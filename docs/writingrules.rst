@@ -75,7 +75,7 @@ keywords are reserved and cannot be used as an identifier:
      - uint8be
    * - wide
      - xor
-     -
+     - defined
      -
      -
      -
@@ -146,8 +146,8 @@ shown below.
 Hexadecimal strings
 -------------------
 
-Hexadecimal strings allow three special constructions that make them more
-flexible: wild-cards, jumps, and alternatives. Wild-cards are just placeholders
+Hexadecimal strings allow four special constructions that make them more
+flexible: wild-cards, not operators, jumps, and alternatives. Wild-cards are just placeholders
 that you can put into the string indicating that some bytes are unknown and they
 should match anything. The placeholder character is the question mark (?). Here
 you have an example of a hexadecimal string with wild-cards:
@@ -166,7 +166,27 @@ you have an example of a hexadecimal string with wild-cards:
 As shown in the example the wild-cards are nibble-wise, which means that you can
 define just one nibble of the byte and leave the other unknown.
 
-Wild-cards are useful when defining strings whose content can vary but you know
+Starting with version 4.3.0, you may specify that a byte is not a specific
+value. For that you can use the not operator with a byte value:
+
+.. code-block:: yara
+
+    rule NotExample
+    {
+        strings:
+            $hex_string = { F4 23 ~00 62 B4 }
+            $hex_string2 = { F4 23 ~?0 62 B4 }
+        condition:
+            $hex_string and $hex_string2
+    }
+
+In the example above we have a byte prefixed with a tilde (~), which is the not operator.
+This defines that the byte in that location can take any value except the value specified.
+In this case the first string will only match if the byte is not 00. The not operator can
+also be used with nibble-wise wild-cards, so the second string will only match if the
+second nibble is not zero.
+
+Wild-cards and not operators are useful when defining strings whose content can vary but you know
 the length of the variable chunks, however, this is not always the case. In some
 circumstances you may need to define strings with chunks of variable content and
 length. In those situations you can use jumps instead of wild-cards:
@@ -304,7 +324,7 @@ encoding format used by your text editor. This never meant to be a feature, the
 original intention always was that YARA strings should be ASCII-only and YARA
 4.1.0 started to raise warnings about non-ASCII characters in strings. This
 limitation does not apply to strings in the metadata section or comments. See
-more details [here](https://github.com/VirusTotal/yara/wiki/Unicode-characters-in-YARA)
+more details `here <https://github.com/VirusTotal/yara/wiki/Unicode-characters-in-YARA>`_.
 
 
 Case-insensitive strings
@@ -327,7 +347,7 @@ of the string definition, in the same line:
 
 With the ``nocase`` modifier the string *foobar* will match *Foobar*, *FOOBAR*,
 and *fOoBaR*. This modifier can be used in conjunction with any modifier,
-except ``base64`` and ``base64wide``.
+except ``base64``, ``base64wide`` and ``xor``.
 
 Wide-character strings
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -405,7 +425,7 @@ The above rule is logically equivalent to:
             any of them
     }
 
-You can also combine the ``xor`` modifier with ``wide`` and ``ascii``
+You can also combine the ``xor`` modifier with ``fullword``, ``wide``, and ``ascii``
 modifiers. For example, to search for the ``wide`` and ``ascii`` versions of a
 string after every single byte XOR has been applied you would use:
 
@@ -445,7 +465,7 @@ equivalent:
             any of them
     }
 
-Since YARA 3.11, if you want more control over the range of bytes used with the ``xor`` modifier use:
+Since YARA 3.11, if you want more control over the range of bytes used with the ``xor`` modifier, use:
 
 .. code-block:: yara
 
@@ -578,8 +598,8 @@ new-line characters. For example:
     }
 
 Notice that ``/foo/i`` is equivalent to ``/foo/ nocase``, but we recommend the
-latter when defining strings. The ``/foo/i`` syntax is useful when writting
-case-insentive regular expressions for the ``matches`` operator.
+latter when defining strings. The ``/foo/i`` syntax is useful when writing
+case-insensitive regular expressions for the ``matches`` operator.
 
 In previous versions of YARA, external libraries like PCRE and RE2 were used
 to perform regular expression matching, but starting with version 2.0 YARA uses
@@ -697,6 +717,16 @@ Starting with version 3.3.0 these zero-width assertions are also recognized:
    * - ``\B``
      - Match except at a word boundary
 
+.. warning:: The regular expression engine scans a limited amount of data
+    while evaluating a match. This limit is 4096 bytes by default and is
+    controlled by the ``YR_RE_SCAN_LIMIT`` constant defined in
+    *libyara/include/yara/limits.h*. A match that would require scanning
+    beyond this limit is not reported and no error is raised, which usually
+    shows up with wildcards or large repetitions: a regular expression like
+    ``/foo.*bar/`` won't match if *foo* and *bar* are separated by more than
+    4096 bytes. If you need a larger limit you can define
+    ``YR_RE_SCAN_LIMIT`` at compile time.
+
 
 Private strings
 ---------------
@@ -716,6 +746,26 @@ the C API.
 
         condition:
             $text_string
+    }
+
+Unreferenced strings
+--------------------
+
+YARA 4.5.0 allows for unreferenced strings in the condition. If a string
+identifier starts with an ``_`` then it does not have to be referenced in the
+condition. Any other string must be referenced in the condition. This is useful
+if you want to search for particular strings and handle them in a custom
+callback but don't really need them for your condition logic.
+
+.. code-block:: yara
+
+    rule PrivateStringExample
+    {
+        strings:
+            $_unreferenced = "AXSERS"
+
+        condition:
+            true
     }
 
 String Modifier Summary
@@ -847,6 +897,8 @@ Precedence  Operator     Description                                Associativit
             matches      String matches regular expression
 ----------  -----------  -----------------------------------------  -------------
 11          not          Logical NOT                                Right-to-left
+
+            defined      Check if an expression is defined
 ----------  -----------  -----------------------------------------  -------------
 12          and          Logical AND                                Left-to-right
 ----------  -----------  -----------------------------------------  -------------
@@ -898,6 +950,16 @@ For example:
 
 This rule matches any file or process containing the string $a exactly six times,
 and more than ten occurrences of string $b.
+
+Starting with YARA 4.2.0 it is possible to express the count of a string in an
+integer range, like this:
+
+.. code-block:: yara
+
+    #a in (filesize-500..filesize) == 2
+
+In this example the number of 'a' strings in the last 500 bytes of the file must
+equal exactly 2.
 
 .. _string-offsets:
 
@@ -1083,6 +1145,8 @@ itself. As an example let's see a rule to distinguish PE files:
     }
 
 
+.. _sets-of-strings:
+
 Sets of strings
 ---------------
 
@@ -1167,6 +1231,18 @@ The keywords ``any``, ``all`` and ``none`` can be used as well.
     1 of ($*)         // same that "any of them"
     none of ($b*)     // zero of the set of strings that start with "$b"
 
+.. warning:: Due to the way YARA works internally, using "0 of them" is an
+    ambiguous part of the language which should be avoided in favor of "none
+    of them". To understand this, consider the meaning of "2 of them", which
+    is true if 2 or more of the strings match. Historically, "0 of them"
+    followed this principle and would evaluate to true if at least one of the
+    strings matched. This ambiguity is resolved in YARA 4.3.0 by making "0 of
+    them" evaluate to true if exactly 0 of the strings match. To improve on
+    the situation and make the intent clear, it is encouraged to use "none" in
+    place of 0. By not using an integer it is easier to reason about the meaning
+    of "none of them" without the historical understanding of "at least 0"
+    clouding the issue.
+
 
 Starting with YARA 4.2.0 it is possible to express a set of strings in an
 integer range, like this:
@@ -1175,6 +1251,13 @@ integer range, like this:
 
     all of ($a*) in (filesize-500..filesize)
     any of ($a*, $b*) in (1000..2000)
+
+Starting with YARA 4.3.0 it is possible to express a set of strings at a
+specific offset, like this:
+
+.. code-block:: yara
+
+    any of ($a*) at 0
 
 
 Applying the same condition to many strings
@@ -1224,6 +1307,18 @@ occurrences, the first offset, and the length of each string respectively.
     for all of ($a*) : ( @ > @b )
 
 
+Starting with YARA 4.3.0 you can express conditions over text strings like this:
+
+.. code-block:: yara
+
+    for any s in ("71b36345516e076a0663e0bea97759e4", "1e7f7edeb06de02f2c2a9319de99e033") : ( pe.imphash() == s )
+
+It is worth remembering here that the two hashes referenced in the rule are
+normal text strings, and have nothing to do with the string section of the rule.
+Inside the loop condition the result of the `pe.imphash()` function is compared
+to each of the text strings, resulting in a more concise rule.
+
+
 Using anonymous strings with ``of`` and ``for..of``
 ---------------------------------------------------
 
@@ -1256,7 +1351,8 @@ using the syntax: @a[i], where i is an index indicating which occurrence
 of the string $a you are referring to. (@a[1], @a[2],...).
 
 Sometimes you will need to iterate over some of these offsets and guarantee
-they satisfy a given condition. For example:
+they satisfy a given condition. In such cases you can use the ``for..in`` syntax,
+for example:
 
 .. code-block:: yara
 
@@ -1272,7 +1368,7 @@ they satisfy a given condition. For example:
 
 The previous rule says that the first occurrence of $b should be 10 bytes
 after the first occurrence of $a, and the same should happen with the second
-and third ocurrences of the two strings.
+and third occurrences of the two strings.
 
 The same condition could be written also as:
 
@@ -1301,17 +1397,15 @@ applies here:
     for any i in (1..#a) : ( @a[i] < 100 )
     for 2 i in (1..#a) : ( @a[i] < 100 )
 
-In summary, the syntax of this operator is:
-
-.. code-block:: yara
-
-    for expression identifier in indexes : ( boolean_expression )
+The ``for..in`` operator is similar to ``for..of``, but the latter iterates over
+a set of strings, while the former iterates over ranges, enumerations, arrays and
+dictionaries.
 
 
 Iterators
 ---------
 
-In YARA 4.0 the ``for..of`` operator was improved and now it can be used to
+In YARA 4.0 the ``for..in`` operator was improved and now it can be used to
 iterate not only over integer enumerations and ranges (e.g: 1,2,3,4 and 1..4),
 but also over any kind of iterable data type, like arrays and dictionaries
 defined by YARA modules. For example, the following expression is valid in
@@ -1337,7 +1431,7 @@ hold the key and value for each entry in the dictionary, for example:
 
     for any k,v in some_dict : ( k == "foo" and v == "bar" )
 
-In general the ``for..of`` operator has the form:
+In general the ``for..in`` operator has the form:
 
 .. code-block:: yara
 
@@ -1383,6 +1477,54 @@ depend on others. Let's see an example:
 As can be seen in the example, a file will satisfy Rule2 only if it contains
 the string "dummy2" and satisfies Rule1. Note that it is strictly necessary to
 define the rule being invoked before the one that will make the invocation.
+
+Another way to reference other rules was introduced in 4.2.0 and that is sets
+of rules, which operate similarly to sets of strings (see
+:ref:`sets-of-strings)`. For example:
+
+.. code-block:: yara
+
+    rule Rule1
+    {
+        strings:
+            $a = "dummy1"
+
+        condition:
+            $a
+    }
+
+    rule Rule2
+    {
+        strings:
+            $a = "dummy2"
+
+        condition:
+            $a
+    }
+
+    rule MainRule
+    {
+        strings:
+            $a = "dummy2"
+
+        condition:
+            any of (Rule*)
+    }
+
+This example demonstrates how to use rule sets to describe higher order logic
+in a way which automatically grows with your rules. If you define another rule
+named ``Rule3`` before ``MainRule`` then it will automatically be included in
+the expansion of ``Rule*`` in the condition for MainRule.
+
+To use rule sets all of the rules included in the set **must** exist prior to
+the rule set being used. For example, the following will produce a compiler
+error because ``a2`` is defined after the rule set is used in ``x``:
+
+.. code-block:: yara
+
+    rule a1 { condition: true }
+    rule x { condition: 1 of (a*) }
+    rule a2 { condition: true }
 
 More about rules
 ================
@@ -1579,8 +1721,15 @@ files, because ``pe.entry_point`` is undefined for those files. This implies tha
 
 If the condition is ``pe.entry_point == 0x1000`` alone, it will evaluate to ``false``
 for non-PE files, and so will do ``pe.entry_point != 0x1000`` and
-``not pe.entry_point == 0x1000``, as non of these expressions make sense for non-PE
+``not pe.entry_point == 0x1000``, as none of these expressions make sense for non-PE
 files.
+
+To check if expression is defined use unary operator ``defined``. Example:
+
+.. code-block:: yara
+
+    defined pe.entry_point
+
 
 
 External variables

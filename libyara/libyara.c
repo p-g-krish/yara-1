@@ -52,6 +52,17 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 YR_THREAD_STORAGE_KEY yr_yyfatal_trampoline_tls;
 YR_THREAD_STORAGE_KEY yr_trycatch_trampoline_tls;
 
+#if !(_WIN32 || __CYGWIN__)
+
+#include <pthread.h>
+#include <signal.h>
+
+struct sigaction old_sigsegv_exception_handler;
+struct sigaction old_sigbus_exception_handler;
+int exception_handler_usecount = 0;
+pthread_mutex_t exception_handler_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 static int init_count = 0;
 
 static struct yr_config_var
@@ -154,7 +165,6 @@ char *yr_debug_error_as_string(int error)
   case ERROR_WRONG_TYPE                    : s = "ERROR_WRONG_TYPE"                    ; break;
   case ERROR_EXEC_STACK_OVERFLOW           : s = "ERROR_EXEC_STACK_OVERFLOW"           ; break;
   case ERROR_SCAN_TIMEOUT                  : s = "ERROR_SCAN_TIMEOUT"                  ; break;
-  case ERROR_TOO_MANY_SCAN_THREADS         : s = "ERROR_TOO_MANY_SCAN_THREADS"         ; break;
   case ERROR_CALLBACK_ERROR                : s = "ERROR_CALLBACK_ERROR"                ; break;
   case ERROR_INVALID_ARGUMENT              : s = "ERROR_INVALID_ARGUMENT"              ; break;
   case ERROR_TOO_MANY_MATCHES              : s = "ERROR_TOO_MANY_MATCHES"              ; break;
@@ -235,6 +245,7 @@ YR_API int yr_initialize(void)
   uint32_t def_stack_size = DEFAULT_STACK_SIZE;
   uint32_t def_max_strings_per_rule = DEFAULT_MAX_STRINGS_PER_RULE;
   uint32_t def_max_match_data = DEFAULT_MAX_MATCH_DATA;
+  uint64_t def_max_process_memory_chunk = DEFAULT_MAX_PROCESS_MEMORY_CHUNK;
 
   init_count++;
 
@@ -295,6 +306,9 @@ YR_API int yr_initialize(void)
   FAIL_ON_ERROR(yr_set_configuration(
       YR_CONFIG_MAX_STRINGS_PER_RULE, &def_max_strings_per_rule));
 
+  FAIL_ON_ERROR(yr_set_configuration(
+      YR_CONFIG_MAX_PROCESS_MEMORY_CHUNK, &def_max_process_memory_chunk));
+
   FAIL_ON_ERROR(
       yr_set_configuration(YR_CONFIG_MAX_MATCH_DATA, &def_max_match_data));
 
@@ -354,24 +368,29 @@ YR_API int yr_finalize(void)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Sets a configuration option.
+// Set a configuration option.
 //
 // This function receives a configuration name, as defined by the YR_CONFIG_NAME
 // enum, and a pointer to the value being set. The type of the value depends on
 // the configuration name.
 //
+// The caller must ensure that the pointer passed to the function is the correct
+// type. Using yr_set_configuration_uintXX is preferred, as those functions will
+// perform the necessary type checking.
+//
 // Args:
 //   name: Any of the values defined by the YR_CONFIG_NAME enum. Possible values
 //         are:
-//              YR_CONFIG_STACK_SIZE             data type: uint32_t
-//              YR_CONFIG_MAX_STRINGS_PER_RULE   data type: uint32_t
-//              YR_CONFIG_MAX_MATCH_DATA         data type: uint32_t
+//              YR_CONFIG_STACK_SIZE                data type: uint32_t
+//              YR_CONFIG_MAX_STRINGS_PER_RULE      data type: uint32_t
+//              YR_CONFIG_MAX_MATCH_DATA            data type: uint32_t
+//              YR_CONFIG_MAX_PROCESS_MEMORY_CHUNK  data type: uint64_t
 //
 //   src: Pointer to the value being set for the option.
 //
 // Returns:
 //   ERROR_SUCCESS
-//   ERROR_INTERNAL_FATAL_ERROR
+//   ERROR_INVALID_ARGUMENT
 //
 YR_API int yr_set_configuration(YR_CONFIG_NAME name, void *src)
 {
@@ -386,6 +405,10 @@ YR_API int yr_set_configuration(YR_CONFIG_NAME name, void *src)
     yr_cfgs[name].ui32 = *(uint32_t *) src;
     break;
 
+  case YR_CONFIG_MAX_PROCESS_MEMORY_CHUNK:
+    yr_cfgs[name].ui64 = *(uint64_t *) src;
+    break;
+
   default:
     return ERROR_INTERNAL_FATAL_ERROR;
   }
@@ -393,10 +416,76 @@ YR_API int yr_set_configuration(YR_CONFIG_NAME name, void *src)
   return ERROR_SUCCESS;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Set a configuration option.
+//
+// This function receives a configuration name, as defined by the YR_CONFIG_NAME
+// and a value for the configuration being set. Only configuration names with
+// type uint32_t will be accepted, if not ERROR_INVALID_ARGUMENT will be
+// returned.
+//
+// Returns:
+//   ERROR_SUCCESS
+//   ERROR_INVALID_ARGUMENT
+//
+YR_API int yr_set_configuration_uint32(YR_CONFIG_NAME name, uint32_t value)
+{
+  switch (name)
+  {
+  // Accept only the configuration options that are of type uint32_t.
+  case YR_CONFIG_STACK_SIZE:
+  case YR_CONFIG_MAX_STRINGS_PER_RULE:
+  case YR_CONFIG_MAX_MATCH_DATA:
+    return yr_set_configuration(name, &value);
+  default:
+    return ERROR_INVALID_ARGUMENT;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Set a configuration option.
+//
+// See yr_set_configuration_uint32 for more details.
+//
+YR_API int yr_set_configuration_uint64(YR_CONFIG_NAME name, uint64_t value)
+{
+  switch (name)
+  {
+  case YR_CONFIG_MAX_PROCESS_MEMORY_CHUNK:
+    return yr_set_configuration(name, &value);
+  default:
+    return ERROR_INVALID_ARGUMENT;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Get a configuration option.
+//
+// This function receives a configuration name, as defined by the YR_CONFIG_NAME
+// enum, and a pointer to the variable that will receive the value for that
+// option. The type of the value depends on the configuration name.
+//
+// The caller must ensure that the pointer passed to the function is the correct
+// type. Using yr_get_configuration_uintXX is preferred.
+//
+// Args:
+//   name: Any of the values defined by the YR_CONFIG_NAME enum. Possible values
+//         are:
+//              YR_CONFIG_STACK_SIZE                data type: uint32_t
+//              YR_CONFIG_MAX_STRINGS_PER_RULE      data type: uint32_t
+//              YR_CONFIG_MAX_MATCH_DATA            data type: uint32_t
+//              YR_CONFIG_MAX_PROCESS_MEMORY_CHUNK  data type: uint64_t
+//
+//   dest: Pointer to a variable that will receive the value for the option.
+//
+// Returns:
+//   ERROR_SUCCESS
+//   ERROR_INVALID_ARGUMENT
+//
 YR_API int yr_get_configuration(YR_CONFIG_NAME name, void *dest)
 {
   if (dest == NULL)
-    return ERROR_INTERNAL_FATAL_ERROR;
+    return ERROR_INVALID_ARGUMENT;
 
   switch (name)
   {  // lump all the cases using same types together in one cascade
@@ -406,9 +495,79 @@ YR_API int yr_get_configuration(YR_CONFIG_NAME name, void *dest)
     *(uint32_t *) dest = yr_cfgs[name].ui32;
     break;
 
+  case YR_CONFIG_MAX_PROCESS_MEMORY_CHUNK:
+    *(uint64_t *) dest = yr_cfgs[name].ui64;
+    break;
+
   default:
-    return ERROR_INTERNAL_FATAL_ERROR;
+    return ERROR_INVALID_ARGUMENT;
   }
 
   return ERROR_SUCCESS;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Get a configuration option.
+//
+// This function receives a configuration name, as defined by the YR_CONFIG_NAME
+// and a value for the configuration being set. Only configuration names with
+// type uint32_t will be accepted, if not ERROR_INVALID_ARGUMENT will be
+// returned.
+//
+// Returns:
+//   ERROR_SUCCESS
+//   ERROR_INVALID_ARGUMENT
+//
+YR_API int yr_get_configuration_uint32(YR_CONFIG_NAME name, uint32_t *dest)
+{
+  switch (name)
+  {
+  // Accept only the configuration options that are of type uint32_t.
+  case YR_CONFIG_STACK_SIZE:
+  case YR_CONFIG_MAX_STRINGS_PER_RULE:
+  case YR_CONFIG_MAX_MATCH_DATA:
+    return yr_get_configuration(name, (void *) dest);
+  default:
+    return ERROR_INVALID_ARGUMENT;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Get a configuration option.
+//
+// See yr_get_configuration_uint64 for more details.
+//
+YR_API int yr_get_configuration_uint64(YR_CONFIG_NAME name, uint64_t *value)
+{
+  switch (name)
+  {
+  case YR_CONFIG_MAX_PROCESS_MEMORY_CHUNK:
+    return yr_get_configuration(name, (void *) value);
+  default:
+    return ERROR_INVALID_ARGUMENT;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Get the version of the library loaded at runtime.
+//
+// The YR_MAJOR_VERSION, YR_MINOR_VERSION and YR_MICRO_VERSION macros are fixed
+// at compile time, so a program linked against libyara.so cannot use them to
+// tell which version it ended up with. This function reports the version of
+// the library that is actually loaded.
+//
+// Any argument may be NULL if the caller does not need that component. This
+// function does not depend on any global state, so unlike the rest of the API
+// it can be called before yr_initialize.
+//
+YR_API void yr_get_version(int *major, int *minor, int *micro)
+{
+  if (major != NULL)
+    *major = YR_MAJOR_VERSION;
+
+  if (minor != NULL)
+    *minor = YR_MINOR_VERSION;
+
+  if (micro != NULL)
+    *micro = YR_MICRO_VERSION;
 }

@@ -39,10 +39,8 @@ The original idea and inspiration for this module comes from Armin Buescher.
 
 #define MODULE_NAME magic
 
-
 // Thread-local storage key used to store a pointer to a MAGIC_CACHE struct.
 YR_THREAD_STORAGE_KEY magic_tls;
-
 
 typedef struct
 {
@@ -51,7 +49,6 @@ typedef struct
   const char* cached_mime_type;
 
 } MAGIC_CACHE;
-
 
 static int get_cache(MAGIC_CACHE** cache)
 {
@@ -67,11 +64,15 @@ static int get_cache(MAGIC_CACHE** cache)
     (*cache)->magic_cookie = magic_open(0);
 
     if ((*cache)->magic_cookie == NULL)
+    {
+      yr_free(*cache);
       return ERROR_INSUFFICIENT_MEMORY;
+    }
 
     if (magic_load((*cache)->magic_cookie, NULL) != 0)
     {
       magic_close((*cache)->magic_cookie);
+      yr_free(*cache);
       return ERROR_INTERNAL_FATAL_ERROR;
     }
 
@@ -84,10 +85,9 @@ static int get_cache(MAGIC_CACHE** cache)
   return ERROR_SUCCESS;
 }
 
-
 define_function(magic_mime_type)
 {
-  YR_SCAN_CONTEXT* context = scan_context();
+  YR_SCAN_CONTEXT* context = yr_scan_context();
   YR_MEMORY_BLOCK* block;
   MAGIC_CACHE* cache;
 
@@ -101,14 +101,20 @@ define_function(magic_mime_type)
   if (cache->cached_mime_type == NULL)
   {
     block = first_memory_block(context);
-    block_data = block->fetch_data(block);
+
+    if (block == NULL)
+      return_string(YR_UNDEFINED);
+
+    block_data = yr_fetch_block_data(block);
 
     if (block_data != NULL)
     {
       magic_setflags(cache->magic_cookie, MAGIC_MIME_TYPE);
 
-      cache->cached_mime_type = magic_buffer(
+      const char* type = magic_buffer(
           cache->magic_cookie, block_data, block->size);
+
+      cache->cached_mime_type = (type == NULL) ? NULL : yr_strdup(type);
     }
   }
 
@@ -118,12 +124,11 @@ define_function(magic_mime_type)
   return_string((char*) cache->cached_mime_type);
 }
 
-
 define_function(magic_type)
 {
   MAGIC_CACHE* cache;
   YR_MEMORY_BLOCK* block;
-  YR_SCAN_CONTEXT* context = scan_context();
+  YR_SCAN_CONTEXT* context = yr_scan_context();
 
   const uint8_t* block_data;
 
@@ -135,14 +140,20 @@ define_function(magic_type)
   if (cache->cached_type == NULL)
   {
     block = first_memory_block(context);
-    block_data = block->fetch_data(block);
+
+    if (block == NULL)
+      return_string(YR_UNDEFINED);
+
+    block_data = yr_fetch_block_data(block);
 
     if (block_data != NULL)
     {
       magic_setflags(cache->magic_cookie, 0);
 
-      cache->cached_type = magic_buffer(
+      const char* type = magic_buffer(
           cache->magic_cookie, block_data, block->size);
+
+      cache->cached_type = (type == NULL) ? NULL : yr_strdup(type);
     }
   }
 
@@ -157,12 +168,10 @@ begin_declarations
   declare_function("type", "", "s", magic_type);
 end_declarations
 
-
 int module_initialize(YR_MODULE* module)
 {
   return yr_thread_storage_create(&magic_tls);
 }
-
 
 int module_finalize(YR_MODULE* module)
 {
@@ -177,7 +186,6 @@ int module_finalize(YR_MODULE* module)
   return yr_thread_storage_destroy(&magic_tls);
 }
 
-
 int module_load(
     YR_SCAN_CONTEXT* context,
     YR_OBJECT* module_object,
@@ -187,13 +195,18 @@ int module_load(
   return ERROR_SUCCESS;
 }
 
-
 int module_unload(YR_OBJECT* module)
 {
   MAGIC_CACHE* cache = (MAGIC_CACHE*) yr_thread_storage_get_value(&magic_tls);
 
   if (cache != NULL)
   {
+    if (cache->cached_type != NULL)
+      yr_free((void*) cache->cached_type);
+
+    if (cache->cached_mime_type != NULL)
+      yr_free((void*) cache->cached_mime_type);
+
     cache->cached_type = NULL;
     cache->cached_mime_type = NULL;
   }

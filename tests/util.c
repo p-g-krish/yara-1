@@ -389,6 +389,12 @@ static void _compiler_callback(
 
 int compile_rule(char* string, YR_RULES** rules)
 {
+  bool strict_escape_flag = false;
+  return compile_rule_ex(string, rules, strict_escape_flag);
+}
+
+int compile_rule_ex(char* string, YR_RULES** rules, bool strict_escape_flag)
+{
   YR_COMPILER* compiler = NULL;
   int result = ERROR_SUCCESS;
 
@@ -401,7 +407,15 @@ int compile_rule(char* string, YR_RULES** rules)
     goto _exit;
   }
 
+  compiler->strict_escape = strict_escape_flag;
+
   yr_compiler_set_callback(compiler, _compiler_callback, &warnings);
+
+  // Define some variables that will be used in test cases.
+  yr_compiler_define_integer_variable(compiler, "var_zero", 0);
+  yr_compiler_define_integer_variable(compiler, "var_one", 1);
+  yr_compiler_define_boolean_variable(compiler, "var_true", 1);
+  yr_compiler_define_boolean_variable(compiler, "var_false", 0);
 
   if (yr_compiler_add_string(compiler, string, NULL) != 0)
   {
@@ -515,7 +529,11 @@ int matches_blob(
 
   if (scan_result != ERROR_SUCCESS)
   {
-    fprintf(stderr, "error: scan_result: %d\n", scan_result);
+    fprintf(
+        stderr,
+        "failed to scan using rule << %s >>: error: %d\n",
+        rule,
+        scan_result);
     exit(EXIT_FAILURE);
   }
 
@@ -564,8 +582,9 @@ static int capture_matches(
       yr_string_matches_foreach(context, string, match)
       {
         if (strlen(f->expected) == match->data_length &&
-            strncmp(f->expected, (char*) (match->data), match->data_length) ==
-                0)
+            (match->data_length == 0 ||
+             strncmp(f->expected, (char*) (match->data), match->data_length) ==
+                 0))
         {
           f->found++;
         }
@@ -592,16 +611,16 @@ int capture_string(char* rule, char* string, char* expected_string)
   f.found = 0;
   f.expected = expected_string;
 
-  if (yr_rules_scan_mem(
-          rules,
-          (uint8_t*) string,
-          strlen(string),
-          0,
-          capture_matches,
-          &f,
-          0) != ERROR_SUCCESS)
+  int scan_result = yr_rules_scan_mem(
+      rules, (uint8_t*) string, strlen(string), 0, capture_matches, &f, 0);
+
+  if (scan_result != ERROR_SUCCESS)
   {
-    fprintf(stderr, "yr_rules_scan_mem: error\n");
+    fprintf(
+        stderr,
+        "failed to scan using rule << %s >>: error %d\n",
+        rule,
+        scan_result);
     exit(EXIT_FAILURE);
   }
 
@@ -701,7 +720,7 @@ void assert_re_atoms(char* re, int expected_atom_count, atom* expected_atoms)
 
   int exit_code;
 
-  yr_re_parse(re, &re_ast, &re_error);
+  yr_re_parse(re, &re_ast, &re_error, RE_PARSER_FLAG_NONE);
   exit_code = _assert_atoms(re_ast, expected_atom_count, expected_atoms);
 
   if (re_ast != NULL)

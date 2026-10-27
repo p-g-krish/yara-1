@@ -325,13 +325,173 @@ YR_API int yr_rules_scan_proc(
 
 int yr_rules_from_arena(YR_ARENA* arena, YR_RULES** rules)
 {
+  if (arena->num_buffers < YR_NUM_SECTIONS)
+    return ERROR_CORRUPT_FILE;
+
+  YR_SUMMARY* summary = (YR_SUMMARY*) yr_arena_get_ptr(
+      arena, YR_SUMMARY_SECTION, 0);
+
+  if (summary == NULL)
+    return ERROR_CORRUPT_FILE;
+
+  // The rule, string and namespace counts are taken verbatim from the loaded
+  // summary. Reject any count that doesn't fit the table it indexes, otherwise
+  // the rules_table walk below (and the string/namespace tables the scanner
+  // indexes with these counts) run past the end of the loaded buffers.
+  if ((uint64_t) summary->num_rules * sizeof(YR_RULE) >
+          yr_arena_get_current_offset(arena, YR_RULES_TABLE) ||
+      (uint64_t) summary->num_strings * sizeof(YR_STRING) >
+          yr_arena_get_current_offset(arena, YR_STRINGS_TABLE) ||
+      (uint64_t) summary->num_namespaces * sizeof(YR_NAMESPACE) >
+          yr_arena_get_current_offset(arena, YR_NAMESPACES_TABLE))
+  {
+    return ERROR_CORRUPT_FILE;
+  }
+
+  YR_RULE* rules_table = yr_arena_get_ptr(arena, YR_RULES_TABLE, 0);
+  YR_STRING* strings_table = yr_arena_get_ptr(arena, YR_STRINGS_TABLE, 0);
+  YR_NAMESPACE* namespaces_table = yr_arena_get_ptr(
+      arena, YR_NAMESPACES_TABLE, 0);
+
+  for (uint32_t i = 0; i < summary->num_namespaces; i++)
+  {
+    if (namespaces_table[i].idx >= summary->num_namespaces)
+      return ERROR_CORRUPT_FILE;
+  }
+
+  for (uint32_t i = 0; i < summary->num_strings; i++)
+  {
+    if (strings_table[i].idx >= summary->num_strings ||
+        strings_table[i].rule_idx >= summary->num_rules)
+    {
+      return ERROR_CORRUPT_FILE;
+    }
+  }
+
+  for (uint32_t i = 0; i < summary->num_rules; i++)
+  {
+    if (namespaces_table == NULL ||
+        rules_table[i].ns < namespaces_table ||
+        rules_table[i].ns >= namespaces_table + summary->num_namespaces ||
+        ((uintptr_t) rules_table[i].ns - (uintptr_t) namespaces_table) %
+                sizeof(YR_NAMESPACE) !=
+            0)
+    {
+      return ERROR_CORRUPT_FILE;
+    }
+  }
+
+  size_t ext_vars_size = yr_arena_get_current_offset(
+      arena, YR_EXTERNAL_VARIABLES_TABLE);
+
+  if (ext_vars_size == 0 ||
+      ext_vars_size % sizeof(YR_EXTERNAL_VARIABLE) != 0)
+  {
+    return ERROR_CORRUPT_FILE;
+  }
+
+  YR_EXTERNAL_VARIABLE* ext_vars = yr_arena_get_ptr(
+      arena, YR_EXTERNAL_VARIABLES_TABLE, 0);
+
+  bool found_null_external = false;
+
+  for (size_t i = 0; i < ext_vars_size / sizeof(YR_EXTERNAL_VARIABLE); i++)
+  {
+    YR_EXTERNAL_VARIABLE* external = &ext_vars[i];
+
+    if (EXTERNAL_VARIABLE_IS_NULL(external))
+    {
+      found_null_external = true;
+      break;
+    }
+
+    if (external->type != EXTERNAL_VARIABLE_TYPE_FLOAT &&
+        external->type != EXTERNAL_VARIABLE_TYPE_INTEGER &&
+        external->type != EXTERNAL_VARIABLE_TYPE_BOOLEAN &&
+        external->type != EXTERNAL_VARIABLE_TYPE_STRING)
+    {
+      return ERROR_CORRUPT_FILE;
+    }
+
+    YR_ARENA_REF ref;
+    if (external->identifier == NULL ||
+        !yr_arena_ptr_to_ref(arena, external->identifier, &ref) ||
+        memchr(
+            external->identifier,
+            '\0',
+            yr_arena_get_current_offset(arena, ref.buffer_id) - ref.offset) ==
+            NULL)
+    {
+      return ERROR_CORRUPT_FILE;
+    }
+
+    if (external->type == EXTERNAL_VARIABLE_TYPE_STRING &&
+        (external->value.s == NULL ||
+         !yr_arena_ptr_to_ref(arena, external->value.s, &ref) ||
+         memchr(
+             external->value.s,
+             '\0',
+             yr_arena_get_current_offset(arena, ref.buffer_id) - ref.offset) ==
+             NULL))
+    {
+      return ERROR_CORRUPT_FILE;
+    }
+  }
+
+  if (!found_null_external)
+    return ERROR_CORRUPT_FILE;
+
+  // The Aho-Corasick transition and match tables are read verbatim from the
+  // loaded file and drive the per-byte scan loop in _yr_scanner_scan_mem_block,
+  // which reads transition_table[state + b] (b is a scanned byte, so the offset
+  // is 1..256), match_table[state] and ac_match_pool[match_table[state] - 1]
+  // with state taken from the tables themselves. Reject a file whose tables are
+  // too small or whose next-state / match-pool indexes fall outside them,
+  // otherwise those reads run out of bounds while scanning.
+  YR_AC_TRANSITION* transition_table = yr_arena_get_ptr(
+      arena, YR_AC_TRANSITION_TABLE, 0);
+
+  uint32_t* match_table = yr_arena_get_ptr(arena, YR_AC_STATE_MATCHES_TABLE, 0);
+
+  uint32_t transition_table_size = yr_arena_get_current_offset(
+                                       arena, YR_AC_TRANSITION_TABLE) /
+                                   sizeof(YR_AC_TRANSITION);
+
+  uint32_t match_table_size = yr_arena_get_current_offset(
+                                  arena, YR_AC_STATE_MATCHES_TABLE) /
+                              sizeof(uint32_t);
+
+  uint32_t match_pool_size = yr_arena_get_current_offset(
+                                 arena, YR_AC_STATE_MATCHES_POOL) /
+                             sizeof(YR_AC_MATCH);
+
+  // Every state leaves room for the 256 input offsets read after it, so a valid
+  // table always has at least 257 slots and the match table is never shorter.
+  if (transition_table_size < 257 || match_table_size < transition_table_size)
+    return ERROR_CORRUPT_FILE;
+
+  for (uint32_t i = 0; i < transition_table_size; i++)
+  {
+    if (YR_AC_NEXT_STATE(transition_table[i]) + 256 >= transition_table_size)
+      return ERROR_CORRUPT_FILE;
+
+    if (match_table[i] > match_pool_size)
+      return ERROR_CORRUPT_FILE;
+  }
+
   YR_RULES* new_rules = (YR_RULES*) yr_malloc(sizeof(YR_RULES));
 
   if (new_rules == NULL)
     return ERROR_INSUFFICIENT_MEMORY;
 
-  YR_SUMMARY* summary = (YR_SUMMARY*) yr_arena_get_ptr(
-      arena, YR_SUMMARY_SECTION, 0);
+  new_rules->no_required_strings = (YR_BITMASK*) yr_calloc(
+      sizeof(YR_BITMASK), YR_BITMASK_SIZE(summary->num_rules));
+
+  if (new_rules->no_required_strings == NULL)
+  {
+    yr_free(new_rules);
+    return ERROR_INSUFFICIENT_MEMORY;
+  }
 
   // Now YR_RULES relies on this arena, let's increment the arena's
   // reference count so that if the original owner of the arena calls
@@ -343,9 +503,8 @@ int yr_rules_from_arena(YR_ARENA* arena, YR_RULES** rules)
   new_rules->num_strings = summary->num_strings;
   new_rules->num_namespaces = summary->num_namespaces;
 
-  new_rules->rules_table = yr_arena_get_ptr(arena, YR_RULES_TABLE, 0);
-
-  new_rules->strings_table = yr_arena_get_ptr(arena, YR_STRINGS_TABLE, 0);
+  new_rules->rules_table = rules_table;
+  new_rules->strings_table = strings_table;
 
   new_rules->ext_vars_table = yr_arena_get_ptr(
       arena, YR_EXTERNAL_VARIABLES_TABLE, 0);
@@ -361,6 +520,15 @@ int yr_rules_from_arena(YR_ARENA* arena, YR_RULES** rules)
 
   new_rules->code_start = yr_arena_get_ptr(arena, YR_CODE_SECTION, 0);
 
+  // If a rule has no required_strings, this means that the condition might
+  // evaluate to true without any matching strings, and we therefore have to
+  // mark it as "to be evaluated" from the beginning.
+  for (int i = 0; i < new_rules->num_rules; i++)
+  {
+    if (new_rules->rules_table[i].required_strings == 0)
+      yr_bitmask_set(new_rules->no_required_strings, i);
+  }
+
   *rules = new_rules;
 
   return ERROR_SUCCESS;
@@ -375,13 +543,13 @@ YR_API int yr_rules_load_stream(YR_STREAM* stream, YR_RULES** rules)
 
   // Create the YR_RULES object from the arena, this makes YR_RULES owner
   // of the arena too.
-  FAIL_ON_ERROR(yr_rules_from_arena(arena, rules));
+  int result = yr_rules_from_arena(arena, rules);
 
   // Release our ownership so that YR_RULES is the single owner. This way the
   // arena is destroyed when YR_RULES is destroyed.
   yr_arena_release(arena);
-
-  return ERROR_SUCCESS;
+  
+  return result;
 }
 
 YR_API int yr_rules_load(const char* filename, YR_RULES** rules)
@@ -521,6 +689,7 @@ YR_API int yr_rules_destroy(YR_RULES* rules)
     external++;
   }
 
+  yr_free(rules->no_required_strings);
   yr_arena_release(rules->arena);
   yr_free(rules);
 

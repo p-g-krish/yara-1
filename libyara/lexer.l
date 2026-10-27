@@ -208,6 +208,7 @@ octdigit      [0-7]
 "iendswith"             { return _IENDSWITH_;   }
 "iequals"               { return _IEQUALS_;     }
 "import"                { return _IMPORT_;      }
+"defined"               { return _DEFINED_;     }
 
 
 "/*"                    { BEGIN(comment);       }
@@ -728,7 +729,7 @@ u?int(8|16|32)(be)? {
 }
 
 
-\{(({hexdigit}|[ \-|\?\[\]\(\)\n\r\t]|\/\*(\/|\**[^*/])*\*+\/)+|\/\/.*)+\}  {
+\{(({hexdigit}|[ \-|\~\?\[\]\(\)\n\r\t]|\/\*(\/|\**[^*/])*\*+\/)+|\/\/.*\n)+\}  {
   // Match hex-digits with whitespace or comments. The latter are stripped
   // out by hex_lexer.l
   // TODO(vmalvarez): Integrate the hex string lexer and parser into this one,
@@ -824,12 +825,6 @@ void yyerror(
   char message[512] = {'\0'};
   char* file_name = NULL;
 
-  /*
-    if error_message != NULL the error comes from yyparse internal code
-    else the error comes from my code and the error code is set in
-    compiler->last_error
-  */
-
   compiler->errors++;
 
   if (compiler->current_line != 0)
@@ -855,6 +850,10 @@ void yyerror(
         compiler->arena,
         YR_RULES_TABLE,
         compiler->current_rule_idx * sizeof(YR_RULE));
+
+  // if error_message != NULL the error comes from yyparse internal code
+  // else the error comes from my code and the error code is set in
+  // compiler->last_error
 
   if (error_message != NULL)
   {
@@ -887,6 +886,42 @@ void yyerror(
 }
 
 
+int yr_lex_parse_rules_bytes(
+    const void* rules_data,
+    size_t rules_size,
+    YR_COMPILER* compiler)
+{
+  yyscan_t yyscanner;
+
+  compiler->errors = 0;
+
+  if (rules_data == NULL)
+    return 0;
+
+  if (yylex_init(&yyscanner) != 0)
+  {
+    compiler->errors = 1;
+    compiler->last_error = ERROR_INSUFFICIENT_MEMORY;
+    return compiler->errors;
+  }
+
+  if (setjmp(compiler->error_recovery) != 0)
+    return compiler->errors;
+
+  #if YYDEBUG
+  yydebug = 1;
+  #endif
+
+  yyset_extra(compiler, yyscanner);
+  yy_scan_bytes(rules_data, rules_size, yyscanner);
+  yyset_lineno(1, yyscanner);
+  yyparse(yyscanner, compiler);
+  yylex_destroy(yyscanner);
+
+  return compiler->errors;
+}
+
+
 int yr_lex_parse_rules_string(
     const char* rules_string,
     YR_COMPILER* compiler)
@@ -895,10 +930,18 @@ int yr_lex_parse_rules_string(
 
   compiler->errors = 0;
 
+  if (rules_string == NULL)
+    return 0;
+
+  if (yylex_init(&yyscanner) != 0)
+  {
+    compiler->errors = 1;
+    compiler->last_error = ERROR_INSUFFICIENT_MEMORY;
+    return compiler->errors;
+  }
+
   if (setjmp(compiler->error_recovery) != 0)
     return compiler->errors;
-
-  yylex_init(&yyscanner);
 
   #if YYDEBUG
   yydebug = 1;
@@ -922,10 +965,15 @@ int yr_lex_parse_rules_file(
 
   compiler->errors = 0;
 
+  if (yylex_init(&yyscanner) != 0)
+  {
+    compiler->errors = 1;
+    compiler->last_error = ERROR_INSUFFICIENT_MEMORY;
+    return compiler->errors;
+  }
+
   if (setjmp(compiler->error_recovery) != 0)
     return compiler->errors;
-
-  yylex_init(&yyscanner);
 
   #if YYDEBUG
   yydebug = 1;
@@ -991,7 +1039,13 @@ int yr_lex_parse_rules_fd(
     return compiler->errors;
   }
 
-  yylex_init(&yyscanner);
+  if (yylex_init(&yyscanner) != 0)
+  {
+    yr_free(buffer);
+    compiler->errors = 1;
+    compiler->last_error = ERROR_INSUFFICIENT_MEMORY;
+    return compiler->errors;
+  }
 
   #if YYDEBUG
   yydebug = 1;

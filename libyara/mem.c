@@ -57,6 +57,14 @@ int yr_heap_free(void)
 
 void* yr_calloc(size_t count, size_t size)
 {
+  // HeapAlloc, unlike the calloc that the C runtime provides on the platforms
+  // below, does not detect a count * size overflow and would silently hand out
+  // a buffer smaller than the caller asked for. Callers of yr_calloc rely on
+  // it behaving like the standard calloc, so perform the check here to keep
+  // both implementations equivalent.
+  if (size != 0 && count > (~(size_t) 0) / size)
+    return NULL;
+
   return (void*) HeapAlloc(hHeap, HEAP_ZERO_MEMORY, count * size);
 }
 
@@ -71,11 +79,6 @@ void* yr_realloc(void* ptr, size_t size)
     return (void*) HeapAlloc(hHeap, HEAP_ZERO_MEMORY, size);
 
   return (void*) HeapReAlloc(hHeap, HEAP_ZERO_MEMORY, ptr, size);
-}
-
-void yr_free(void* ptr)
-{
-  HeapFree(hHeap, 0, ptr);
 }
 
 char* yr_strdup(const char* str)
@@ -106,11 +109,20 @@ char* yr_strndup(const char* str, size_t n)
   return (char*) dup;
 }
 
+YR_API void yr_free(void* ptr)
+{
+  HeapFree(hHeap, 0, ptr);
+}
+
 #else
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(MIMALLOC)
+#include <mimalloc-override.h>
+#endif
 
 int yr_heap_alloc(void)
 {
@@ -137,11 +149,6 @@ void* yr_realloc(void* ptr, size_t size)
   return realloc(ptr, size);
 }
 
-void yr_free(void* ptr)
-{
-  free(ptr);
-}
-
 char* yr_strdup(const char* str)
 {
   return strdup(str);
@@ -150,6 +157,11 @@ char* yr_strdup(const char* str)
 char* yr_strndup(const char* str, size_t n)
 {
   return strndup(str, n);
+}
+
+YR_API void yr_free(void* ptr)
+{
+  free(ptr);
 }
 
 #endif

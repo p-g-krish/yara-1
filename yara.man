@@ -38,6 +38,11 @@ Print rules named
 .I identifier
 and ignore the rest. This option can be used multiple times.
 .TP
+.BI "    --max-process-memory-chunk=" size
+While scanning process memory read data in chunks of the given
+.I size
+in bytes.
+.TP
 .BI \-l " number" " --max-rules=" number
 Abort scanning after a
 .I number
@@ -62,6 +67,9 @@ Print metadata associated to the rule.
 .B \-D " --print-module-data"
 Print module data.
 .TP
+.B \-M " --module-names"
+show module names
+.TP
 .B \-e " --print-namespace"
 Print namespace associated to the rule.
 .TP
@@ -74,18 +82,35 @@ Print strings found in the file.
 .B \-L " --print-string-length"
 Print length of strings found in the file.
 .TP
+.B \-X " --print-xor-key"
+Print xor key and plaintext of matched strings.
+.TP
 .B \-g " --print-tags"
 Print the tags associated to the rule.
 .TP
 .B \-r " --recursive"
 Scan files in directories recursively. It follows symlinks.
 .TP
+.B \-N " --no-follow-symlinks"
+Do not follow symlinks when scanning.
+.TP
 .BI "    --scan-list"
 Scan files listed in FILE, one per line.
+.TP
+.BI \-z " size" " --skip-larger=" size
+Skip files larger than the given
+.I size
+in bytes when scanning a directory.
 .TP
 .BI \-k " slots" " --stack-size=" slots
 Set maximum stack size to the specified number of
 .I slots.
+.TP
+.BI \-E " --strict-escape"
+Print warnings if rules contain ambiguous escape statements.
+.TP
+.B \-q " --disable-console-logs"
+Disable printing console log messages.
 .TP
 .BI \-t " tag" " --tag=" tag
 Print rules tagged as
@@ -104,6 +129,9 @@ has elapsed.
 .TP
 .B \-v " --version"
 Show version information.
+.TP
+.B \-h " --help"
+Show this help and exit.
 .SH EXAMPLES
 $ yara /foo/bar/rules .
 .RS

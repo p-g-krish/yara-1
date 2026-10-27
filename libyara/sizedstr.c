@@ -32,6 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <yara/globals.h>
 #include <yara/mem.h>
 #include <yara/sizedstr.h>
+#include <yara/strutils.h>
 #include <yara/types.h>
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -250,6 +251,7 @@ SIZED_STRING* ss_convert_to_wide(SIZED_STRING* s)
   }
 
   wide->length = s->length * 2;
+  wide->c_string[wide->length] = '\x00';
   wide->flags = s->flags | STRING_FLAGS_WIDE;
 
   return wide;

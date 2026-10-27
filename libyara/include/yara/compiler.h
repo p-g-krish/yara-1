@@ -42,13 +42,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define YARA_ERROR_LEVEL_WARNING 1
 
 // Expression type constants are powers of two because they are used as flags.
-#define EXPRESSION_TYPE_UNKNOWN 0
-#define EXPRESSION_TYPE_BOOLEAN 1
-#define EXPRESSION_TYPE_INTEGER 2
-#define EXPRESSION_TYPE_STRING  4
-#define EXPRESSION_TYPE_REGEXP  8
-#define EXPRESSION_TYPE_OBJECT  16
-#define EXPRESSION_TYPE_FLOAT   32
+#define EXPRESSION_TYPE_UNKNOWN    0
+#define EXPRESSION_TYPE_BOOLEAN    1
+#define EXPRESSION_TYPE_INTEGER    2
+#define EXPRESSION_TYPE_STRING     4
+#define EXPRESSION_TYPE_REGEXP     8
+#define EXPRESSION_TYPE_OBJECT     16
+#define EXPRESSION_TYPE_FLOAT      32
+#define EXPRESSION_TYPE_QUANTIFIER 64
 
 // The compiler uses an arena to store the data it generates during the
 // compilation. Each buffer in the arena is used for storing a different type
@@ -74,6 +75,26 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // variables.
 #define YR_INTERNAL_LOOP_VARS 3
 
+typedef struct _YR_ENUMERATION
+{
+  int type;
+  int count;
+} YR_ENUMERATION;
+
+typedef struct _YR_STRING_SET_ELEMENT
+{
+  YR_ARENA_REF element;
+  struct _YR_STRING_SET_ELEMENT* next;
+} YR_STRING_SET_ELEMENT;
+
+typedef struct _YR_STRING_SET
+{
+  int64_t count;
+  YR_STRING_SET_ELEMENT* head;
+} YR_STRING_SET;
+
+int yr_string_set_destroy(YR_STRING_SET string_set);
+
 typedef struct _YR_EXPRESSION
 {
   int type;
@@ -81,9 +102,17 @@ typedef struct _YR_EXPRESSION
   union
   {
     int64_t integer;
+    double double_;
     YR_OBJECT* object;
     YR_ARENA_REF sized_string_ref;
   } value;
+
+  // Boolean expressions can hold a string count. If not empty, this indicates
+  // that the condition can only be fulfilled if at least so many strings match.
+  struct
+  {
+    int count;
+  } required_strings;
 
   // An expression can have an associated identifier, if "ptr" is not NULL it
   // points to the identifier name, if it is NULL, then "ref" holds a reference
@@ -223,6 +252,7 @@ typedef struct _YR_COMPILER
   int current_line;
   int last_error;
   int last_error_line;
+  bool strict_escape;
 
   jmp_buf error_recovery;
 
@@ -230,6 +260,20 @@ typedef struct _YR_COMPILER
   YR_HASH_TABLE* rules_table;
   YR_HASH_TABLE* objects_table;
   YR_HASH_TABLE* strings_table;
+
+  // Hash table that contains all the identifiers with wildcards used in
+  // conditions. This is used to make sure we error out if we are parsing a
+  // rule _AFTER_ an existing rule has referenced it in a condition. For
+  // example:
+  //
+  // rule a1 { condition: true }
+  // rule b { condition: 1 of (a*) }
+  // rule a2 { condition: true }
+  //
+  // This must be a compiler error when parsing a2 because b has already been
+  // parsed and the instructions to check _ONLY_ a1 have been emitted. Rule b
+  // has no concept of a2 and would not work as expected.
+  YR_HASH_TABLE* wildcard_identifiers_table;
 
   // Hash table that contains all the strings that has been written to the
   // YR_SZ_POOL buffer in the compiler's arena. Values in the hash table are
@@ -259,7 +303,7 @@ typedef struct _YR_COMPILER
   char* lex_buf_ptr;
   unsigned short lex_buf_len;
 
-  char include_base_dir[MAX_PATH];
+  char include_base_dir[YR_MAX_PATH];
   void* user_data;
   void* incl_clbk_user_data;
   void* re_ast_clbk_user_data;
@@ -352,6 +396,12 @@ YR_API int yr_compiler_add_fd(
     YR_FILE_DESCRIPTOR rules_fd,
     const char* namespace_,
     const char* file_name);
+
+YR_API int yr_compiler_add_bytes(
+    YR_COMPILER* compiler,
+    const void* rules_data,
+    size_t rules_size,
+    const char* namespace_);
 
 YR_API int yr_compiler_add_string(
     YR_COMPILER* compiler,

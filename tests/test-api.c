@@ -28,14 +28,20 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <yara.h>
+#include <yara/compiler.h>
+#include <yara/exec.h>
+#include <yara/notebook.h>
+#include <yara/scan.h>
 
 #include "util.h"
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 #include <fileapi.h>
 #else
+#include <sys/mman.h>
 #include <unistd.h>
 #endif
 #include <fcntl.h>
@@ -46,10 +52,30 @@ void test_disabled_rules()
   YR_RULE* rule;
 
   char* buf = "foo bar";
-  char* rules_str = " \
-    rule disabled_rule {condition: true} \
-    rule false_rule {condition: true and disabled_rule} \
-    rule true_rule {condition: true or disabled_rule}";
+  char* rules_str =
+      "import \"math\" \
+      rule disabled_rule {condition: true} \
+      rule false_rule_1 {condition: true and disabled_rule} \
+      rule false_rule_2 {condition: not disabled_rule} \
+      rule false_rule_3 {condition: defined disabled_rule} \
+      rule true_rule_1 {condition: true or disabled_rule} \
+      rule true_rule_2 {condition: any of (disabled_rule, true_rule_1)} \
+      rule true_rule_3 {condition: 1 of (disabled_rule, true_rule_1)} \
+      rule true_rule_4 {condition: 50% of (disabled_rule, true_rule_1)} \
+      rule false_rule_4 {condition: all of (disabled_rule, true_rule_1)} \
+      rule false_rule_5 {condition: 2 of (disabled_rule, true_rule_1)} \
+      rule false_rule_6 {condition: 100% of (disabled_rule, true_rule_1)} \
+      rule false_rule_7 {condition: 1 of (disabled_*)} \
+      rule false_rule_8 { \
+        condition: \
+          for all i in (1..2) : ( \
+            0x414141414141 of (disabled_rule, true_rule_1) \
+          ) \
+      } \
+      rule false_rule_9 { \
+        condition: \
+          math.to_number(0x414141414141 of (disabled_rule, true_rule_1)) == 1 \
+      }";
 
   struct COUNTERS counters;
 
@@ -65,7 +91,7 @@ void test_disabled_rules()
     exit(EXIT_FAILURE);
   }
 
-  // diable any rule containing disable in its identifier
+  // disable any rule containing disable in its identifier
   yr_rules_foreach(rules, rule)
   {
     if (strstr(rule->identifier, "disabled"))
@@ -76,8 +102,8 @@ void test_disabled_rules()
 
   yr_rules_destroy(rules);
 
-  // matches should be exactly one.
-  if (counters.rules_matching != 1)
+  // matches should be exactly 4 (true_rule_1..4).
+  if (counters.rules_matching != 4)
   {
     fprintf(stderr, "test_disabled_rules failed\n");
     exit(EXIT_FAILURE);
@@ -127,6 +153,48 @@ void test_include_callback()
   }
 
   yr_compiler_destroy(compiler);
+
+#if !defined(_WIN32) && !defined(__CYGWIN__)
+  if (sizeof(off_t) >= 8)
+  {
+    char include_path[] = "yara-test-include.XXXXXX";
+    int fd = mkstemp(include_path);
+    assert_true_expr(fd != -1);
+
+    const char* rule_body = "rule included_rule { condition: true }\n";
+    assert_true_expr(
+        write(fd, rule_body, strlen(rule_body)) == (ssize_t) strlen(rule_body));
+
+    // Grow the file into a sparse 2^32 - 1 byte file. On 32-bit builds with
+    // 64-bit off_t, (size_t) file_size + 1 would wrap around to 0 and overflow
+    // the heap buffer in _yr_compiler_default_include_callback().
+    if (ftruncate(fd, (off_t) UINT32_MAX) == 0)
+    {
+      close(fd);
+      fd = -1;
+
+      assert_true_expr(yr_compiler_create(&compiler) == ERROR_SUCCESS);
+
+      char include_stmt[128];
+      snprintf(
+          include_stmt,
+          sizeof(include_stmt),
+          "include \"%s\"",
+          include_path);
+
+      assert_true_expr(
+          yr_compiler_add_string(compiler, include_stmt, NULL) == 1);
+
+      yr_compiler_destroy(compiler);
+    }
+
+    if (fd != -1)
+      close(fd);
+
+    unlink(include_path);
+  }
+#endif
+
   yr_finalize();
 }
 
@@ -196,11 +264,11 @@ void test_max_string_per_rules()
 
   yr_initialize();
 
-  yr_get_configuration(
-      YR_CONFIG_MAX_STRINGS_PER_RULE, (void*) &old_max_strings_per_rule);
+  yr_get_configuration_uint32(
+      YR_CONFIG_MAX_STRINGS_PER_RULE, &old_max_strings_per_rule);
 
-  yr_set_configuration(
-      YR_CONFIG_MAX_STRINGS_PER_RULE, (void*) &new_max_strings_per_rule);
+  yr_set_configuration_uint32(
+      YR_CONFIG_MAX_STRINGS_PER_RULE, new_max_strings_per_rule);
 
   assert_error(
       "rule test { \
@@ -213,8 +281,8 @@ void test_max_string_per_rules()
 
   new_max_strings_per_rule = 2;
 
-  yr_set_configuration(
-      YR_CONFIG_MAX_STRINGS_PER_RULE, (void*) &new_max_strings_per_rule);
+  yr_set_configuration_uint32(
+      YR_CONFIG_MAX_STRINGS_PER_RULE, new_max_strings_per_rule);
 
   assert_error(
       "rule test { \
@@ -225,8 +293,8 @@ void test_max_string_per_rules()
            all of them }",
       ERROR_SUCCESS);
 
-  yr_set_configuration(
-      YR_CONFIG_MAX_STRINGS_PER_RULE, (void*) &old_max_strings_per_rule);
+  yr_set_configuration_uint32(
+      YR_CONFIG_MAX_STRINGS_PER_RULE, old_max_strings_per_rule);
 
   yr_finalize();
 }
@@ -248,7 +316,7 @@ int test_max_match_data_callback(
 
       yr_string_matches_foreach(context, s, m)
       {
-        if (m->data_length > 0)
+        if (m->data_length > 0 || m->data != NULL)
           return CALLBACK_ERROR;
       }
     }
@@ -264,13 +332,13 @@ void test_max_match_data()
   uint32_t new_max_match_data = 0;
   uint32_t old_max_match_data;
 
-  char* rules_str = "rule t { strings: $a = \"foobar\" condition: $a }";
+  char* rules_str =
+      "rule t { strings: $a = \"foobar\" $b = { 66 6f [-] 61 72 } condition: all of them }";
 
   yr_initialize();
 
-  yr_get_configuration(YR_CONFIG_MAX_MATCH_DATA, (void*) &old_max_match_data);
-
-  yr_set_configuration(YR_CONFIG_MAX_MATCH_DATA, (void*) &new_max_match_data);
+  yr_get_configuration_uint32(YR_CONFIG_MAX_MATCH_DATA, &old_max_match_data);
+  yr_set_configuration_uint32(YR_CONFIG_MAX_MATCH_DATA, new_max_match_data);
 
   if (compile_rule(rules_str, &rules) != ERROR_SUCCESS)
   {
@@ -293,6 +361,278 @@ void test_max_match_data()
     exit(EXIT_FAILURE);
   }
 
+  yr_set_configuration_uint32(YR_CONFIG_MAX_MATCH_DATA, old_max_match_data);
+  yr_rules_destroy(rules);
+  yr_finalize();
+}
+
+int ignore_too_many_matches(
+    YR_SCAN_CONTEXT* context,
+    int message,
+    void* message_data,
+    void* user_data)
+{
+  return CALLBACK_CONTINUE;
+}
+
+int propagate_too_many_matches(
+    YR_SCAN_CONTEXT* context,
+    int message,
+    void* message_data,
+    void* user_data)
+{
+  if (message == CALLBACK_MSG_TOO_MANY_MATCHES)
+    return CALLBACK_ERROR;
+
+  return CALLBACK_CONTINUE;
+}
+
+void test_too_many_matches()
+{
+  YR_RULES* rules;
+
+  char* rules_str = "\
+      rule t { \
+        strings: \
+          $a = \"aa\" \
+          $b = { 61 61 [-] 61 61} \
+        condition: \
+          any of them \
+       }";
+
+  yr_initialize();
+
+  if (compile_rule(rules_str, &rules) != ERROR_SUCCESS)
+  {
+    perror("compile_rule");
+    exit(EXIT_FAILURE);
+  }
+
+  uint8_t* buffer = (uint8_t*) malloc(2 * YR_MAX_STRING_MATCHES);
+
+  if (buffer == NULL)
+  {
+    perror("malloc");
+    exit(EXIT_FAILURE);
+  }
+
+  memset(buffer, 'a', 2 * YR_MAX_STRING_MATCHES);
+
+  int err = yr_rules_scan_mem(
+      rules,
+      (const uint8_t*) buffer,
+      2 * YR_MAX_STRING_MATCHES,
+      0,
+      propagate_too_many_matches,
+      NULL,
+      0);
+
+  if (err != ERROR_TOO_MANY_MATCHES)
+  {
+    fprintf(
+        stderr,
+        "test_too_many_matches failed, expecting ERROR_TOO_MANY_MATCHES, got "
+        "%d\n",
+        err);
+
+    free(buffer);
+    exit(EXIT_FAILURE);
+  }
+
+  err = yr_rules_scan_mem(
+      rules,
+      (const uint8_t*) buffer,
+      2 * YR_MAX_STRING_MATCHES,
+      0,
+      ignore_too_many_matches,
+      NULL,
+      0);
+
+  if (err != ERROR_SUCCESS)
+  {
+    fprintf(
+        stderr,
+        "test_too_many_matches failed, expecting ERROR_SUCCESS, got %d\n",
+        err);
+
+    free(buffer);
+    exit(EXIT_FAILURE);
+  }
+
+  free(buffer);
+  yr_rules_destroy(rules);
+  yr_finalize();
+}
+
+int ignore_too_slow_scanning(
+    YR_SCAN_CONTEXT* context,
+    int message,
+    void* message_data,
+    void* user_data)
+{
+  return CALLBACK_CONTINUE;
+}
+
+int propagate_too_slow_scanning(
+    YR_SCAN_CONTEXT* context,
+    int message,
+    void* message_data,
+    void* user_data)
+{
+  if (message == CALLBACK_MSG_TOO_SLOW_SCANNING)
+    return CALLBACK_ERROR;
+
+  return CALLBACK_CONTINUE;
+}
+
+void test_too_slow_scanning_slow_string_matches()
+{
+  YR_RULES* rules;
+
+  char* rules_str = "\
+      rule t { \
+        strings: \
+          $a = /a.{0,18}/ \
+        condition: \
+          $a \
+       }";
+
+  yr_initialize();
+
+  if (compile_rule(rules_str, &rules) != ERROR_SUCCESS)
+  {
+    perror("compile_rule");
+    exit(EXIT_FAILURE);
+  }
+
+  uint8_t* buffer = (uint8_t*) malloc(YR_SLOW_STRING_MATCHES+100);
+
+  if (buffer == NULL)
+  {
+    perror("malloc");
+    exit(EXIT_FAILURE);
+  }
+
+  memset(buffer, 'a', YR_SLOW_STRING_MATCHES+100);
+
+  int err = yr_rules_scan_mem(
+      rules,
+      (const uint8_t*) buffer,
+      YR_SLOW_STRING_MATCHES+100,
+      0,
+      propagate_too_slow_scanning,
+      NULL,
+      0);
+
+  if (err != ERROR_TOO_SLOW_SCANNING)
+  {
+    fprintf(
+        stderr,
+        "test_too_slow_scanning_slow_string_matches failed, expecting ERROR_TOO_SLOW_SCANNING, got "
+        "%d\n",
+        err);
+
+    free(buffer);
+    exit(EXIT_FAILURE);
+  }
+
+  err = yr_rules_scan_mem(
+      rules,
+      (const uint8_t*) buffer,
+      YR_SLOW_STRING_MATCHES+100,
+      0,
+      ignore_too_slow_scanning,
+      NULL,
+      0);
+
+  if (err != ERROR_SUCCESS)
+  {
+    fprintf(
+        stderr,
+        "test_too_slow_scanning_slow_string_matches failed, expecting ERROR_SUCCESS, got %d\n",
+        err);
+
+    free(buffer);
+    exit(EXIT_FAILURE);
+  }
+
+  free(buffer);
+  yr_rules_destroy(rules);
+  yr_finalize();
+}
+
+void test_too_slow_scanning()
+{
+  YR_RULES* rules;
+
+  char* rules_str = "\
+      rule t { \
+        strings: \
+          $a = /\\w+/ \
+        condition: \
+          $a \
+       }";
+
+  yr_initialize();
+
+  if (compile_rule(rules_str, &rules) != ERROR_SUCCESS)
+  {
+    perror("compile_rule");
+    exit(EXIT_FAILURE);
+  }
+
+  uint8_t* buffer = (uint8_t*) malloc(2 * YR_FILE_SIZE_THRESHOLD);
+
+  if (buffer == NULL)
+  {
+    perror("malloc");
+    exit(EXIT_FAILURE);
+  }
+
+  memset(buffer, 'a', 2 * YR_FILE_SIZE_THRESHOLD);
+
+  int err = yr_rules_scan_mem(
+      rules,
+      (const uint8_t*) buffer,
+      2 * YR_FILE_SIZE_THRESHOLD,
+      0,
+      propagate_too_slow_scanning,
+      NULL,
+      0);
+
+  if (err != ERROR_TOO_SLOW_SCANNING)
+  {
+    fprintf(
+        stderr,
+        "test_too_slow_scanning failed, expecting ERROR_TOO_SLOW_SCANNING, got "
+        "%d\n",
+        err);
+
+    free(buffer);
+    exit(EXIT_FAILURE);
+  }
+
+  err = yr_rules_scan_mem(
+      rules,
+      (const uint8_t*) buffer,
+      2 * CALLBACK_MSG_TOO_SLOW_SCANNING,
+      0,
+      ignore_too_slow_scanning,
+      NULL,
+      0);
+
+  if (err != ERROR_SUCCESS)
+  {
+    fprintf(
+        stderr,
+        "test_too_slow_scanning failed, expecting ERROR_SUCCESS, got %d\n",
+        err);
+
+    free(buffer);
+    exit(EXIT_FAILURE);
+  }
+
+  free(buffer);
   yr_rules_destroy(rules);
   yr_finalize();
 }
@@ -369,6 +709,395 @@ void test_save_load_rules()
 
     exit(EXIT_FAILURE);
   }
+
+  yr_rules_destroy(rules);
+  yr_finalize();
+}
+
+// A compiled rules file carries a YR_SUMMARY with the rule/string/namespace
+// counts. Loading trusts those counts to walk the corresponding tables, so a
+// crafted file that inflates num_rules must be rejected instead of reading past
+// the loaded YR_RULES_TABLE.
+void test_load_rules_corrupt_summary()
+{
+  YR_COMPILER* compiler = NULL;
+  YR_RULES* rules = NULL;
+
+  yr_initialize();
+
+  if (yr_compiler_create(&compiler) != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  if (yr_compiler_add_string(
+          compiler,
+          "rule a { strings: $a = \"aaa\" condition: $a } "
+          "rule b { condition: true }",
+          NULL) != 0)
+    exit(EXIT_FAILURE);
+
+  if (yr_compiler_get_rules(compiler, &rules) != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  yr_compiler_destroy(compiler);
+
+  if (yr_rules_save(rules, "test-corrupt-summary.yarc") != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  yr_rules_destroy(rules);
+
+  FILE* fh = fopen("test-corrupt-summary.yarc", "rb");
+  assert_true_expr(fh != NULL);
+  fseek(fh, 0, SEEK_END);
+  long size = ftell(fh);
+  fseek(fh, 0, SEEK_SET);
+
+  uint8_t* data = (uint8_t*) malloc(size);
+  assert_true_expr(data != NULL);
+  assert_true_expr(fread(data, 1, size, fh) == (size_t) size);
+  fclose(fh);
+
+  // Arena file layout (see yr_arena_save_stream): a 6-byte header
+  // (magic[4], version, num_buffers) followed by a table of packed 12-byte
+  // {offset(8), size(4)} entries, then the buffer contents. Follow the
+  // YR_SUMMARY_SECTION entry to its content and inflate num_rules, the first
+  // uint32 of YR_SUMMARY.
+  uint64_t summary_offset;
+  memcpy(&summary_offset, data + 6 + 12 * YR_SUMMARY_SECTION, sizeof(uint64_t));
+
+  uint32_t bad_num_rules = 200000;
+  memcpy(data + summary_offset, &bad_num_rules, sizeof(bad_num_rules));
+
+  fh = fopen("test-corrupt-summary.yarc", "wb");
+  assert_true_expr(fh != NULL);
+  assert_true_expr(fwrite(data, 1, size, fh) == (size_t) size);
+  fclose(fh);
+  free(data);
+
+  int result = yr_rules_load("test-corrupt-summary.yarc", &rules);
+
+  if (result != ERROR_CORRUPT_FILE)
+  {
+    fprintf(
+        stderr,
+        "test_load_rules_corrupt_summary: expecting ERROR_CORRUPT_FILE, got "
+        "%d\n",
+        result);
+    exit(EXIT_FAILURE);
+  }
+
+  yr_finalize();
+}
+
+// Each external variable in a compiled rules file carries a type field. A
+// crafted file can hold a value that is none of the serialized
+// EXTERNAL_VARIABLE_TYPE_X values, which the loader must reject.
+void test_load_rules_bad_external_type()
+{
+  YR_COMPILER* compiler = NULL;
+  YR_RULES* rules = NULL;
+  yr_initialize();
+
+  if (yr_compiler_create(&compiler) != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  if (yr_compiler_define_integer_variable(compiler, "ext_var", 0) !=
+      ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  if (yr_compiler_add_string(
+          compiler, "rule a { condition: ext_var == 0 }", NULL) != 0)
+    exit(EXIT_FAILURE);
+
+  if (yr_compiler_get_rules(compiler, &rules) != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  yr_compiler_destroy(compiler);
+
+  if (yr_rules_save(rules, "test-bad-external-type.yarc") != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  yr_rules_destroy(rules);
+
+  FILE* fh = fopen("test-bad-external-type.yarc", "rb");
+  assert_true_expr(fh != NULL);
+  fseek(fh, 0, SEEK_END);
+  long size = ftell(fh);
+  fseek(fh, 0, SEEK_SET);
+
+  uint8_t* data = (uint8_t*) malloc(size);
+  assert_true_expr(data != NULL);
+  assert_true_expr(fread(data, 1, size, fh) == (size_t) size);
+  fclose(fh);
+
+  // Arena file layout (see yr_arena_save_stream): a 6-byte header
+  // (magic[4], version, num_buffers) followed by a table of packed 12-byte
+  // {offset(8), size(4)} entries, then the buffer contents. Follow the
+  // YR_EXTERNAL_VARIABLES_TABLE entry to its content and replace the type of
+  // the first YR_EXTERNAL_VARIABLE, which is its first int32.
+  uint64_t ext_vars_offset;
+  memcpy(
+      &ext_vars_offset,
+      data + 6 + 12 * YR_EXTERNAL_VARIABLES_TABLE,
+      sizeof(uint64_t));
+
+  int32_t bad_type = EXTERNAL_VARIABLE_TYPE_MALLOC_STRING + 1;
+  memcpy(data + ext_vars_offset, &bad_type, sizeof(bad_type));
+
+  fh = fopen("test-bad-external-type.yarc", "wb");
+  assert_true_expr(fh != NULL);
+  assert_true_expr(fwrite(data, 1, size, fh) == (size_t) size);
+  fclose(fh);
+  free(data);
+
+  int result = yr_rules_load("test-bad-external-type.yarc", &rules);
+  if (result != ERROR_CORRUPT_FILE)
+  {
+    fprintf(
+        stderr,
+        "test_load_rules_bad_external_type: expecting load to return "
+        "ERROR_CORRUPT_FILE, got "
+        "%d\n",
+        result);
+    exit(EXIT_FAILURE);
+  }
+
+  yr_finalize();
+}
+
+void test_rules_from_arena_bad_external_pointers()
+{
+  YR_COMPILER* compiler = NULL;
+  YR_RULES* rules = NULL;
+  YR_RULES* duplicate = NULL;
+
+  yr_initialize();
+  assert_true_expr(yr_compiler_create(&compiler) == ERROR_SUCCESS);
+  assert_true_expr(
+      yr_compiler_define_string_variable(compiler, "ext_var", "value") ==
+      ERROR_SUCCESS);
+  assert_true_expr(
+      yr_compiler_add_string(
+          compiler, "rule a { condition: ext_var == \"value\" }", NULL) == 0);
+  assert_true_expr(yr_compiler_get_rules(compiler, &rules) == ERROR_SUCCESS);
+  yr_compiler_destroy(compiler);
+
+  YR_EXTERNAL_VARIABLE* external = rules->ext_vars_table;
+  const char* identifier = external->identifier;
+  char* value = external->value.s;
+
+  external->identifier = (const char*) (uintptr_t) 0x6f;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  external->identifier = identifier;
+
+  external->value.s = (char*) (uintptr_t) 0x6f;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  external->value.s = value;
+
+  external->type = EXTERNAL_VARIABLE_TYPE_MALLOC_STRING;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  external->type = EXTERNAL_VARIABLE_TYPE_STRING;
+
+  yr_rules_destroy(rules);
+  yr_finalize();
+}
+
+// The Aho-Corasick transition table in a compiled rules file stores, for every
+// slot, the index of the next state. The scanner follows those indexes on every
+// scanned byte, so a crafted file whose transition points to a state past the
+// end of the table drives an out-of-bounds read while scanning. Loading must
+// reject such a file.
+void test_load_rules_corrupt_ac_transition()
+{
+  YR_COMPILER* compiler = NULL;
+  YR_RULES* rules = NULL;
+
+  yr_initialize();
+
+  if (yr_compiler_create(&compiler) != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  if (yr_compiler_add_string(
+          compiler,
+          "rule a { strings: $a = \"maliciousmarker\" condition: $a }",
+          NULL) != 0)
+    exit(EXIT_FAILURE);
+
+  if (yr_compiler_get_rules(compiler, &rules) != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  yr_compiler_destroy(compiler);
+
+  if (yr_rules_save(rules, "test-corrupt-ac.yarc") != ERROR_SUCCESS)
+    exit(EXIT_FAILURE);
+
+  yr_rules_destroy(rules);
+
+  FILE* fh = fopen("test-corrupt-ac.yarc", "rb");
+  assert_true_expr(fh != NULL);
+  fseek(fh, 0, SEEK_END);
+  long size = ftell(fh);
+  fseek(fh, 0, SEEK_SET);
+
+  uint8_t* data = (uint8_t*) malloc(size);
+  assert_true_expr(data != NULL);
+  assert_true_expr(fread(data, 1, size, fh) == (size_t) size);
+  fclose(fh);
+
+  // Arena file layout (see yr_arena_save_stream): a 6-byte header
+  // (magic[4], version, num_buffers) followed by a table of packed 12-byte
+  // {offset(8), size(4)} entries, then the buffer contents. Follow the
+  // YR_AC_TRANSITION_TABLE entry to its content and point the root's first real
+  // child transition to a state far past the end of the table, keeping its
+  // owner offset so the scanner follows it.
+  uint64_t tt_offset;
+  memcpy(&tt_offset, data + 6 + 12 * YR_AC_TRANSITION_TABLE, sizeof(uint64_t));
+
+  uint32_t* transition_table = (uint32_t*) (data + tt_offset);
+
+  for (uint32_t i = 1; i <= 256; i++)
+  {
+    if (YR_AC_NEXT_STATE(transition_table[i]) != 0)
+    {
+      transition_table[i] = YR_AC_MAKE_TRANSITION(0x7FFFFF, i);
+      break;
+    }
+  }
+
+  fh = fopen("test-corrupt-ac.yarc", "wb");
+  assert_true_expr(fh != NULL);
+  assert_true_expr(fwrite(data, 1, size, fh) == (size_t) size);
+  fclose(fh);
+  free(data);
+
+  int result = yr_rules_load("test-corrupt-ac.yarc", &rules);
+
+  if (result != ERROR_CORRUPT_FILE)
+  {
+    fprintf(
+        stderr,
+        "test_load_rules_corrupt_ac_transition: expecting ERROR_CORRUPT_FILE, "
+        "got %d\n",
+        result);
+    exit(EXIT_FAILURE);
+  }
+
+  yr_finalize();
+}
+
+void test_load_rules_corrupt_num_buffers()
+{
+  yr_initialize();
+
+  // Test num_buffers = 0
+  uint8_t data0[] = {'Y', 'A', 'R', 'A', YR_ARENA_FILE_VERSION, 0, 4, 0};
+  FILE* fh = fopen("test-corrupt-num0.yarc", "wb");
+  assert_true_expr(fh != NULL);
+  assert_true_expr(fwrite(data0, 1, sizeof(data0), fh) == sizeof(data0));
+  fclose(fh);
+
+  YR_RULES* rules = NULL;
+  int result = yr_rules_load("test-corrupt-num0.yarc", &rules);
+  if (result != ERROR_CORRUPT_FILE)
+  {
+    fprintf(
+        stderr,
+        "test_load_rules_corrupt_num_buffers (num_buffers=0): expecting "
+        "ERROR_CORRUPT_FILE, got %d\n",
+        result);
+    exit(EXIT_FAILURE);
+  }
+
+  // Test num_buffers = 1 (fewer than YR_NUM_SECTIONS)
+  uint8_t data1[6 + 12];
+  memset(data1, 0, sizeof(data1));
+  memcpy(data1, "YARA", 4);
+  data1[4] = YR_ARENA_FILE_VERSION;
+  data1[5] = 1;
+
+  fh = fopen("test-corrupt-num1.yarc", "wb");
+  assert_true_expr(fh != NULL);
+  assert_true_expr(fwrite(data1, 1, sizeof(data1), fh) == sizeof(data1));
+  fclose(fh);
+
+  result = yr_rules_load("test-corrupt-num1.yarc", &rules);
+  if (result != ERROR_CORRUPT_FILE)
+  {
+    fprintf(
+        stderr,
+        "test_load_rules_corrupt_num_buffers (num_buffers=1): expecting "
+        "ERROR_CORRUPT_FILE, got %d\n",
+        result);
+    exit(EXIT_FAILURE);
+  }
+
+  yr_finalize();
+}
+
+void test_load_rules_corrupt_table_indices()
+{
+  YR_COMPILER* compiler = NULL;
+  YR_RULES* rules = NULL;
+  YR_RULES* duplicate = NULL;
+
+  yr_initialize();
+
+  assert_true_expr(yr_compiler_create(&compiler) == ERROR_SUCCESS);
+  assert_true_expr(
+      yr_compiler_add_string(
+          compiler,
+          "rule a { strings: $s1 = \"abc\" condition: all of them }",
+          NULL) == 0);
+  assert_true_expr(yr_compiler_get_rules(compiler, &rules) == ERROR_SUCCESS);
+  yr_compiler_destroy(compiler);
+
+  YR_STRING* string = &rules->strings_table[0];
+  YR_RULE* rule = &rules->rules_table[0];
+  YR_NAMESPACE* ns = rule->ns;
+
+  // Out-of-bounds YR_STRING.idx
+  uint32_t orig_string_idx = string->idx;
+  string->idx = rules->num_strings;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  string->idx = 0xFFFFFF00;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  string->idx = orig_string_idx;
+
+  // Out-of-bounds YR_STRING.rule_idx
+  uint32_t orig_rule_idx = string->rule_idx;
+  string->rule_idx = rules->num_rules;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  string->rule_idx = 0xFFFFFF00;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  string->rule_idx = orig_rule_idx;
+
+  // Out-of-bounds YR_NAMESPACE.idx
+  uint32_t orig_ns_idx = ns->idx;
+  ns->idx = rules->num_namespaces;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  ns->idx = 0xFFFFFF00;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  ns->idx = orig_ns_idx;
+
+  // Invalid YR_RULE.ns pointer (NULL, out of range, or misaligned)
+  rule->ns = NULL;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  rule->ns = ns + rules->num_namespaces;
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  rule->ns = (YR_NAMESPACE*) ((uint8_t*) ns + 1);
+  assert_true_expr(
+      yr_rules_from_arena(rules->arena, &duplicate) == ERROR_CORRUPT_FILE);
+  rule->ns = ns;
 
   yr_rules_destroy(rules);
   yr_finalize();
@@ -537,6 +1266,96 @@ void test_scanner()
 
   yr_scanner_destroy(scanner1);
   yr_scanner_destroy(scanner2);
+  yr_rules_destroy(rules);
+  yr_finalize();
+}
+
+// Return CALLBACK_ERROR if the xor key for any string is anything other than 1.
+static int xor_key_check(
+    YR_SCAN_CONTEXT* context,
+    int message,
+    void *message_data,
+    void* user_data)
+{
+  if (message == CALLBACK_MSG_RULE_MATCHING)
+  {
+    YR_RULE* r = (YR_RULE*) message_data;
+    YR_STRING* s;
+
+    yr_rule_strings_foreach(r, s)
+    {
+      YR_MATCH* m;
+
+      yr_string_matches_foreach(context, s, m)
+      {
+        if (m->xor_key != 1)
+          return CALLBACK_ERROR;
+      }
+    }
+    return CALLBACK_CONTINUE;
+  }
+
+  return CALLBACK_ERROR;
+}
+
+// https://github.com/VirusTotal/yara/issues/1851
+void test_xor_key_string_in_atom()
+{
+  const char* buf = "UihrU\x01i\x01h\x01r\x01"; // "This" xor'ed with 0x01
+  const char* rules_str = "\
+      rule test { \
+        strings: \
+          $a = \"This\" xor(1) \
+          $b = \"Th\" xor(1) wide \
+        condition: \
+          any of them \
+      }";
+
+  YR_COMPILER* compiler = NULL;
+  YR_RULES* rules = NULL;
+  YR_SCANNER* scanner = NULL;
+
+  yr_initialize();
+
+  if (yr_compiler_create(&compiler) != ERROR_SUCCESS)
+  {
+    perror("yr_compiler_create");
+    exit(EXIT_FAILURE);
+  }
+
+  if (yr_compiler_add_string(compiler, rules_str, NULL) != 0)
+  {
+    yr_compiler_destroy(compiler);
+    perror("yr_compiler_add_string");
+    exit(EXIT_FAILURE);
+  }
+
+  if (yr_compiler_get_rules(compiler, &rules) != ERROR_SUCCESS)
+  {
+    yr_compiler_destroy(compiler);
+    perror("yr_compiler_get_rules");
+    exit(EXIT_FAILURE);
+  }
+
+  yr_compiler_destroy(compiler);
+
+  if (yr_scanner_create(rules, &scanner) != ERROR_SUCCESS)
+  {
+    yr_rules_destroy(rules);
+    perror("yr_scanner_create");
+    exit(EXIT_FAILURE);
+  }
+
+  yr_scanner_set_callback(scanner, xor_key_check, NULL);
+
+  int err = yr_scanner_scan_mem(scanner, (uint8_t*) buf, strlen(buf));
+  if (err != ERROR_SUCCESS)
+  {
+    fprintf(stderr, "test_xor_key_string_in_atom failed");
+    exit(EXIT_FAILURE);
+  }
+
+  yr_scanner_destroy(scanner);
   yr_rules_destroy(rules);
   yr_finalize();
 }
@@ -729,9 +1548,9 @@ void test_rules_stats()
   assert_true_expr(stats.num_strings == 6);
   assert_true_expr(stats.ac_matches == 6);
   assert_true_expr(stats.ac_root_match_list_length == 0);
-  assert_true_expr(stats.top_ac_match_list_lengths[0] == 3);
-  assert_true_expr(stats.ac_match_list_length_pctls[1] == 3);
-  assert_true_expr(stats.ac_match_list_length_pctls[100] == 3);
+  assert_true_expr(stats.top_ac_match_list_lengths[0] == 1);
+  assert_true_expr(stats.ac_match_list_length_pctls[1] == 1);
+  assert_true_expr(stats.ac_match_list_length_pctls[100] == 1);
 
   stats_for_rules(
       "\
@@ -752,9 +1571,9 @@ void test_rules_stats()
   assert_true_expr(stats.num_strings == 8);
   assert_true_expr(stats.ac_matches == 8);
   assert_true_expr(stats.ac_root_match_list_length == 0);
-  assert_true_expr(stats.top_ac_match_list_lengths[0] == 3);
+  assert_true_expr(stats.top_ac_match_list_lengths[0] == 1);
   assert_true_expr(stats.ac_match_list_length_pctls[1] == 1);
-  assert_true_expr(stats.ac_match_list_length_pctls[100] == 3);
+  assert_true_expr(stats.ac_match_list_length_pctls[100] == 1);
 
   stats_for_rules(
       "\
@@ -898,6 +1717,212 @@ void test_runtime_warnings()
   yr_finalize();
 }
 
+void test_notebook_alloc_overflow()
+{
+  YR_NOTEBOOK* notebook = NULL;
+
+  yr_initialize();
+
+  assert_true_expr(yr_notebook_create(1024, &notebook) == ERROR_SUCCESS);
+
+  // Sizes that would wrap around when rounded up by (size + 7) & ~0x7.
+  assert_true_expr(yr_notebook_alloc(notebook, SIZE_MAX) == NULL);
+  assert_true_expr(yr_notebook_alloc(notebook, SIZE_MAX - 6) == NULL);
+
+  // Size that does not wrap in (size + 7) & ~0x7, but wraps in
+  // (size / min_size) * min_size + min_size.
+  assert_true_expr(yr_notebook_alloc(notebook, SIZE_MAX - 7) == NULL);
+
+  yr_notebook_destroy(notebook);
+
+  // With min_page_size = 16, SIZE_MAX - 23 rounds to SIZE_MAX - 23, and
+  // page_size = (size / 16) * 16 + 16 = SIZE_MAX - 15 does not wrap, but
+  // sizeof(YR_NOTEBOOK_PAGE) + page_size would wrap without the upper bound
+  // check on page_size.
+  assert_true_expr(yr_notebook_create(16, &notebook) == ERROR_SUCCESS);
+  assert_true_expr(yr_notebook_alloc(notebook, SIZE_MAX - 23) == NULL);
+
+  yr_notebook_destroy(notebook);
+  yr_finalize();
+}
+
+void test_chained_string_match_length_overflow()
+{
+#if !defined(_WIN32) && !defined(__CYGWIN__)
+  if (sizeof(size_t) < 8)
+    return;
+
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+
+  // Map a 4 GiB anonymous region; only the three pages touched below are
+  // faulted in, so physical memory usage is a few kilobytes.
+  size_t data_size = (size_t) 0x100000000ULL;
+  uint8_t* data = (uint8_t*) mmap(
+      NULL,
+      data_size,
+      PROT_READ | PROT_WRITE,
+      MAP_PRIVATE | MAP_ANONYMOUS,
+      -1,
+      0);
+
+  if (data == MAP_FAILED)
+    return;
+
+  const char* rules_str =
+      "rule t { "
+      "  strings: "
+      "    $a = { 51 77 65 72 [-] 5A 78 63 76 [-] 4D 6E 62 70 } "
+      "  condition: "
+      "    $a and !a[1] == 0x7fffffff "
+      "}";
+
+  YR_RULES* rules = NULL;
+  YR_SCANNER* scanner = NULL;
+
+  yr_initialize();
+
+  assert_true_expr(compile_rule((char*) rules_str, &rules) == ERROR_SUCCESS);
+  assert_true_expr(yr_scanner_create(rules, &scanner) == ERROR_SUCCESS);
+
+  uint32_t max_match_data;
+  assert_true_expr(
+      yr_get_configuration_uint32(YR_CONFIG_MAX_MATCH_DATA, &max_match_data) ==
+      ERROR_SUCCESS);
+
+  assert_true_expr(
+      yr_notebook_create(
+          1024 * (sizeof(YR_MATCH) + max_match_data),
+          &scanner->matches_notebook) == ERROR_SUCCESS);
+
+  // Place the three 4-byte pieces so that the full chained match spans
+  // 0xffffffff bytes (which truncates to -1 if cast directly to int32_t).
+  size_t off0 = 0;
+  size_t off1 = (size_t) 0x7fffffffULL;
+  size_t off2 = (size_t) 0xfffffffbULL;
+
+  memcpy(data + off0, "\x51\x77\x65\x72", 4);
+  memcpy(data + off1, "\x5A\x78\x63\x76", 4);
+  memcpy(data + off2, "\x4D\x6E\x62\x70", 4);
+
+  // Locate the Aho-Corasick match entries for the three pieces of the chain:
+  // head (chained_to == NULL), middle, and tail (STRING_IS_CHAIN_TAIL).
+  YR_AC_MATCH* ac_head = NULL;
+  YR_AC_MATCH* ac_mid = NULL;
+  YR_AC_MATCH* ac_tail = NULL;
+
+  for (uint32_t i = 0; i < rules->num_strings; i++)
+  {
+    YR_AC_MATCH* m = &rules->ac_match_pool[i];
+    if (m->string == NULL)
+      continue;
+    if (m->string->chained_to == NULL)
+      ac_head = m;
+    else if (STRING_IS_CHAIN_TAIL(m->string))
+      ac_tail = m;
+    else
+      ac_mid = m;
+  }
+
+  assert_true_expr(ac_head != NULL && ac_mid != NULL && ac_tail != NULL);
+
+  assert_true_expr(
+      yr_scan_verify_match(scanner, ac_head, data, data_size, 0, off0) ==
+      ERROR_SUCCESS);
+  assert_true_expr(
+      yr_scan_verify_match(scanner, ac_mid, data, data_size, 0, off1) ==
+      ERROR_SUCCESS);
+  assert_true_expr(
+      yr_scan_verify_match(scanner, ac_tail, data, data_size, 0, off2) ==
+      ERROR_SUCCESS);
+
+  YR_MATCH* match = scanner->matches[ac_head->string->idx].head;
+  assert_true_expr(match != NULL);
+  assert_true_expr(match->offset == 0);
+  assert_true_expr(match->match_length == INT32_MAX);
+  assert_true_expr(match->data_length == (int32_t) max_match_data);
+  assert_true_expr(match->data != NULL);
+  assert_true_expr(memcmp(match->data, "\x51\x77\x65\x72", 4) == 0);
+
+  assert_true_expr(yr_execute_code(scanner) == ERROR_SUCCESS);
+  assert_true_expr(yr_bitmask_is_set(scanner->rule_matches_flags, 0));
+
+  yr_notebook_destroy(scanner->matches_notebook);
+  scanner->matches_notebook = NULL;
+  yr_scanner_destroy(scanner);
+  yr_rules_destroy(rules);
+  yr_finalize();
+
+  munmap(data, data_size);
+#endif
+}
+
+void test_stack_size()
+{
+  YR_RULES* rules;
+  uint32_t old_stack_size;
+  uint8_t buf[] = "foo";
+
+  char* rules_str = "rule t { condition: 1 + 1 == 2 }";
+
+  yr_initialize();
+
+  assert_true_expr(
+      yr_get_configuration_uint32(YR_CONFIG_STACK_SIZE, &old_stack_size) ==
+      ERROR_SUCCESS);
+
+  assert_true_expr(compile_rule(rules_str, &rules) == ERROR_SUCCESS);
+
+  // Evaluating "1 + 1 == 2" requires two slots on the VM stack. With a
+  // capacity of 1 slot the scan must fail with ERROR_EXEC_STACK_OVERFLOW.
+  assert_true_expr(
+      yr_set_configuration_uint32(YR_CONFIG_STACK_SIZE, 1) == ERROR_SUCCESS);
+
+  assert_true_expr(
+      yr_rules_scan_mem(rules, buf, sizeof(buf), 0, do_nothing, NULL, 0) ==
+      ERROR_EXEC_STACK_OVERFLOW);
+
+  assert_true_expr(
+      yr_set_configuration_uint32(YR_CONFIG_STACK_SIZE, 2) == ERROR_SUCCESS);
+
+  assert_true_expr(
+      yr_rules_scan_mem(rules, buf, sizeof(buf), 0, do_nothing, NULL, 0) ==
+      ERROR_SUCCESS);
+
+  // On 32-bit platforms, a stack capacity >= 2^29 wraps around when multiplied
+  // by sizeof(YR_VALUE) (8 bytes) in size_t arithmetic. Verify that such
+  // capacities are rejected with ERROR_INSUFFICIENT_MEMORY instead of
+  // allocating a tiny buffer and overflowing it during execution.
+  if (sizeof(size_t) == 4)
+  {
+    uint32_t wrapping_stack_size = (uint32_t) (SIZE_MAX / sizeof(YR_VALUE)) + 1;
+
+    assert_true_expr(
+        yr_set_configuration_uint32(
+            YR_CONFIG_STACK_SIZE, wrapping_stack_size) == ERROR_SUCCESS);
+
+    assert_true_expr(
+        yr_rules_scan_mem(rules, buf, sizeof(buf), 0, do_nothing, NULL, 0) ==
+        ERROR_INSUFFICIENT_MEMORY);
+
+    assert_true_expr(
+        yr_set_configuration_uint32(
+            YR_CONFIG_STACK_SIZE, wrapping_stack_size + 1) == ERROR_SUCCESS);
+
+    assert_true_expr(
+        yr_rules_scan_mem(rules, buf, sizeof(buf), 0, do_nothing, NULL, 0) ==
+        ERROR_INSUFFICIENT_MEMORY);
+  }
+
+  assert_true_expr(
+      yr_set_configuration_uint32(YR_CONFIG_STACK_SIZE, old_stack_size) ==
+      ERROR_SUCCESS);
+
+  yr_rules_destroy(rules);
+  yr_finalize();
+}
+
 int main(int argc, char** argv)
 {
   int result = 0;
@@ -911,14 +1936,27 @@ int main(int argc, char** argv)
   test_file_descriptor();
   test_max_string_per_rules();
   test_max_match_data();
+  test_too_many_matches();
+  test_too_slow_scanning();
+  test_too_slow_scanning_slow_string_matches();
   test_include_callback();
   test_save_load_rules();
+  test_load_rules_corrupt_summary();
+  test_load_rules_bad_external_type();
+  test_rules_from_arena_bad_external_pointers();
+  test_load_rules_corrupt_ac_transition();
+  test_load_rules_corrupt_num_buffers();
+  test_load_rules_corrupt_table_indices();
   test_scanner();
+  test_xor_key_string_in_atom();
   test_ast_callback();
   test_rules_stats();
   test_issue_834();
   test_issue_920();
   test_runtime_warnings();
+  test_notebook_alloc_overflow();
+  test_chained_string_match_length_overflow();
+  test_stack_size();
 
   YR_DEBUG_FPRINTF(
       1, stderr, "} = %d // %s() in %s\n", result, __FUNCTION__, argv[0]);

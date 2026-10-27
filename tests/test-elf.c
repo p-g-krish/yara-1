@@ -10,7 +10,53 @@ int main(int argc, char** argv)
   YR_DEBUG_INITIALIZE();
   YR_DEBUG_FPRINTF(1, stderr, "+ %s() { // in %s\n", __FUNCTION__, argv[0]);
 
+  init_top_srcdir();
+
   yr_initialize();
+
+  // Each newly exposed e_machine value, checked end to end: patch the value
+  // into the ELF header and confirm elf.machine reports it under the new
+  // constant. Catches both a wrong constant and a value the module drops.
+  struct
+  {
+    const char* name;
+    uint16_t value;
+  } machines[] = {
+      {"EM_PARISC", 15},
+      {"EM_SPARC32PLUS", 18},
+      {"EM_S390", 22},
+      {"EM_MCORE", 39},
+      {"EM_RCE", 39},
+      {"EM_SH", 42},
+      {"EM_SPARCV9", 43},
+      {"EM_ARC_COMPACT", 93},
+      {"EM_BPF", 247},
+      {"EM_LOONGARCH", 258},
+  };
+
+  // e_machine sits at offset 18 and ELF32_FILE is little-endian.
+  uint8_t saved_machine[2] = {ELF32_FILE[18], ELF32_FILE[19]};
+
+  for (size_t i = 0; i < sizeof(machines) / sizeof(machines[0]); i++)
+  {
+    char rule[256];
+
+    ELF32_FILE[18] = (uint8_t) (machines[i].value & 0xFF);
+    ELF32_FILE[19] = (uint8_t) (machines[i].value >> 8);
+
+    snprintf(
+        rule,
+        sizeof(rule),
+        "import \"elf\" rule test { condition: elf.machine == elf.%s and "
+        "elf.machine == %u }",
+        machines[i].name,
+        machines[i].value);
+
+    assert_true_rule_blob(rule, ELF32_FILE);
+  }
+
+  ELF32_FILE[18] = saved_machine[0];
+  ELF32_FILE[19] = saved_machine[1];
 
   assert_true_rule_blob(
       "import \"elf\" rule test { condition: elf.type }", ELF32_FILE);
@@ -169,6 +215,18 @@ int main(int argc, char** argv)
       }",
       ELF32_MIPS_FILE);
 
+  // A big-endian symtab whose sh_link is past the real section count must not
+  // be parsed against an out-of-range section header. Before the e_shnum byte
+  // swap fix a little-endian host accepted the bogus link and reported a
+  // phantom symbol named "ABCD".
+  assert_false_rule_blob(
+      "import \"elf\" \
+      rule test { \
+        condition: \
+          elf.symtab_entries == 1 and elf.symtab[0].name == \"ABCD\" \
+      }",
+      ELF32_BE_BAD_SYMTAB_LINK);
+
   assert_true_rule_blob(
       "import \"elf\" \
       rule test { \
@@ -257,6 +315,16 @@ int main(int argc, char** argv)
             elf.dynamic[i].val == 0x4003c0) \
       }",
       ELF_x64_FILE);
+
+  assert_true_rule_file(
+      "import \"elf\" \
+      rule test { \
+        condition: \
+          elf.telfhash() == \
+            \"T174B012188204F00184540770331E0B111373086019509C464D0ACE88181266C09774FA\" \
+      }",
+      "tests/data/elf_with_imports");
+
 
   yr_finalize();
 

@@ -30,7 +30,7 @@ with :c:func:`yr_compiler_destroy`.
 
 You can use :c:func:`yr_compiler_add_file`, :c:func:`yr_compiler_add_fd`, or
 :c:func:`yr_compiler_add_string` to add one or more input sources to be
-compiler. Both of these functions receive an optional namespace. Rules added
+compiled. Both of these functions receive an optional namespace. Rules added
 under the same namespace behave as if they were contained within the same
 source file or string, so, rule identifiers must be unique among all the sources
 sharing a namespace. If the namespace argument is ``NULL`` the rules are put
@@ -39,7 +39,7 @@ in the *default* namespace.
 The :c:func:`yr_compiler_add_file`, :c:func:`yr_compiler_add_fd`, and
 :c:func:`yr_compiler_add_string` functions return the number of errors found in
 the source code. If the rules are correct they will return 0. If any of these
-functions return an error the compiler can't used anymore, neither for adding
+functions return an error the compiler can't be used anymore, neither for adding
 more rules nor getting the compiled rules.
 
 For obtaining detailed error information you must set a callback function by
@@ -60,7 +60,7 @@ functions. The callback function has the following prototype:
 
 Possible values for ``error_level`` are ``YARA_ERROR_LEVEL_ERROR`` and
 ``YARA_ERROR_LEVEL_WARNING``. The arguments ``file_name`` and ``line_number``
-contains the file name and line number where the error or warning occurs.
+contain the file name and line number where the error or warning occurred.
 ``file_name`` is the one passed to :c:func:`yr_compiler_add_file` or
 :c:func:`yr_compiler_add_fd`. It can be ``NULL`` if you passed ``NULL`` or if
 you're using :c:func:`yr_compiler_add_string`. `rule` is a pointer to the
@@ -226,6 +226,7 @@ Possible values for ``message`` are::
   CALLBACK_MSG_IMPORT_MODULE
   CALLBACK_MSG_MODULE_IMPORTED
   CALLBACK_MSG_TOO_MANY_MATCHES
+  CALLBACK_MSG_CONSOLE_LOG
 
 Your callback function will be called once for each rule with either
 a ``CALLBACK_MSG_RULE_MATCHING`` or ``CALLBACK_MSG_RULE_NOT_MATCHING`` message,
@@ -259,6 +260,12 @@ will be called once with the ``CALLBACK_MSG_TOO_MANY_MATCHES``. When this happen
 ``message_data`` is a ``YR_STRING*`` which points to the string which caused the
 warning. If your callback returns ``CALLBACK_CONTINUE``, the string will be disabled
 and scanning will continue, otherwise scanning will be halted.
+
+Your callback will be called from the console module (:ref:`console-module`)
+with the ``CALLBACK_MSG_CONSOLE_LOG`` message. When this happens, the
+``message_data`` argument will be a ``char*`` that is the string generated
+by the console module. Your callback can do whatever it wants with this string,
+including logging it to an external logging source, or printing it to stdout.
 
 Lastly, the callback function is also called with the
 ``CALLBACK_MSG_SCAN_FINISHED`` message when the scan is finished. In this case
@@ -503,6 +510,19 @@ Functions
   success another error code in case of error. The list of possible return
   codes vary according to the modules compiled into YARA.
 
+.. c:function:: void yr_get_version(int* major, int* minor, int* micro)
+
+  Get the version of the library loaded at runtime. The
+  :c:macro:`YR_MAJOR_VERSION`, :c:macro:`YR_MINOR_VERSION` and
+  :c:macro:`YR_MICRO_VERSION` macros are fixed when your program is compiled,
+  so a program linked against a shared ``libyara`` cannot use them to tell
+  which version it actually got. This function reports that.
+
+  Any argument may be ``NULL`` if you do not need that component. Unlike the
+  rest of the API, this may be called before :c:func:`yr_initialize`.
+
+  .. versionadded:: 4.6.0
+
 .. c:function:: int yr_compiler_create(YR_COMPILER** compiler)
 
   Create a YARA compiler. You must pass the address of a pointer to a
@@ -671,8 +691,6 @@ Functions
 
       :c:macro:`ERROR_INSUFFICIENT_MEMORY`
 
-      :c:macro:`ERROR_TOO_MANY_SCAN_THREADS`
-
       :c:macro:`ERROR_SCAN_TIMEOUT`
 
       :c:macro:`ERROR_CALLBACK_ERROR`
@@ -689,8 +707,6 @@ Functions
     :c:macro:`ERROR_INSUFFICIENT_MEMORY`
 
     :c:macro:`ERROR_COULD_NOT_MAP_FILE`
-
-    :c:macro:`ERROR_TOO_MANY_SCAN_THREADS`
 
     :c:macro:`ERROR_SCAN_TIMEOUT`
 
@@ -711,8 +727,6 @@ Functions
     :c:macro:`ERROR_INSUFFICIENT_MEMORY`
 
     :c:macro:`ERROR_COULD_NOT_MAP_FILE`
-
-    :c:macro:`ERROR_TOO_MANY_SCAN_THREADS`
 
     :c:macro:`ERROR_SCAN_TIMEOUT`
 
@@ -922,8 +936,6 @@ Functions
 
     :c:macro:`ERROR_INSUFFICIENT_MEMORY`
 
-    :c:macro:`ERROR_TOO_MANY_SCAN_THREADS`
-
     :c:macro:`ERROR_SCAN_TIMEOUT`
 
     :c:macro:`ERROR_CALLBACK_ERROR`
@@ -942,8 +954,6 @@ Functions
 
     :c:macro:`ERROR_INSUFFICIENT_MEMORY`
 
-    :c:macro:`ERROR_TOO_MANY_SCAN_THREADS`
-
     :c:macro:`ERROR_SCAN_TIMEOUT`
 
     :c:macro:`ERROR_CALLBACK_ERROR`
@@ -959,8 +969,6 @@ Functions
     :c:macro:`ERROR_SUCCESS`
 
     :c:macro:`ERROR_INSUFFICIENT_MEMORY`
-
-    :c:macro:`ERROR_TOO_MANY_SCAN_THREADS`
 
     :c:macro:`ERROR_SCAN_TIMEOUT`
 
@@ -982,8 +990,6 @@ Functions
 
     :c:macro:`ERROR_INSUFFICIENT_MEMORY`
 
-    :c:macro:`ERROR_TOO_MANY_SCAN_THREADS`
-
     :c:macro:`ERROR_SCAN_TIMEOUT`
 
     :c:macro:`ERROR_CALLBACK_ERROR`
@@ -997,7 +1003,7 @@ Functions
   Return a pointer to the ``YR_RULE`` which triggered a scanning error. In the
   case where the rule is unable to be determined, NULL is returned.
 
-.. c:function:: YR_RULE* yr_scanner_last_error_string(YR_SCANNER* scanner)
+.. c:function:: YR_STRING* yr_scanner_last_error_string(YR_SCANNER* scanner)
 
   .. versionadded:: 3.8.0
 
@@ -1033,12 +1039,6 @@ Error codes
 .. c:macro:: ERROR_UNSUPPORTED_FILE_VERSION
 
   File was generated by a different YARA and can't be loaded by this version.
-
-.. c:macro:: ERROR_TOO_MANY_SCAN_THREADS
-
-  Too many threads trying to use the same :c:type:`YR_RULES` object
-  simultaneously. The limit is defined by ``YR_MAX_THREADS`` in
-  *./include/yara/limits.h*
 
 .. c:macro:: ERROR_SCAN_TIMEOUT
 

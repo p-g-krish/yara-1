@@ -29,7 +29,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <assert.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -107,6 +109,22 @@ const char* _yr_compiler_default_include_callback(
   }
   file_size = stbuf.st_size;
 #endif
+
+  // Reject negative sizes and files too large to fit in memory with a null
+  // terminator or to be passed to flex's yy_scan_string() / yy_scan_bytes(),
+  // which take a signed int length. On 32-bit builds with 64-bit off_t, a size
+  // of 2^32 - 1 would otherwise wrap (size_t) file_size + 1 around to 0.
+  if (file_size < 0 || (uintmax_t) file_size >= INT_MAX ||
+      (uintmax_t) file_size >= SIZE_MAX)
+  {
+#ifdef _MSC_VER
+    _close(fd);
+#else
+    close(fd);
+#endif
+
+    return NULL;
+  }
 
   file_buffer = (char*) yr_malloc((size_t) file_size + 1);
 
@@ -240,6 +258,7 @@ YR_API int yr_compiler_create(YR_COMPILER** compiler)
   new_compiler->re_ast_clbk_user_data = NULL;
   new_compiler->last_error = ERROR_SUCCESS;
   new_compiler->last_error_line = 0;
+  new_compiler->strict_escape = false;
   new_compiler->current_line = 0;
   new_compiler->file_name_stack_ptr = 0;
   new_compiler->fixup_stack_head = NULL;
@@ -257,6 +276,10 @@ YR_API int yr_compiler_create(YR_COMPILER** compiler)
 
   if (result == ERROR_SUCCESS)
     result = yr_hash_table_create(10000, &new_compiler->strings_table);
+
+  if (result == ERROR_SUCCESS)
+    result = yr_hash_table_create(
+        1000, &new_compiler->wildcard_identifiers_table);
 
   if (result == ERROR_SUCCESS)
     result = yr_hash_table_create(10000, &new_compiler->sz_table);
@@ -282,20 +305,28 @@ YR_API int yr_compiler_create(YR_COMPILER** compiler)
 
 YR_API void yr_compiler_destroy(YR_COMPILER* compiler)
 {
-  yr_arena_release(compiler->arena);
+  if (compiler->arena != NULL)
+    yr_arena_release(compiler->arena);
 
   if (compiler->automaton != NULL)
     yr_ac_automaton_destroy(compiler->automaton);
 
-  yr_hash_table_destroy(compiler->rules_table, NULL);
+  if (compiler->rules_table != NULL)
+    yr_hash_table_destroy(compiler->rules_table, NULL);
 
-  yr_hash_table_destroy(compiler->strings_table, NULL);
+  if (compiler->strings_table != NULL)
+    yr_hash_table_destroy(compiler->strings_table, NULL);
 
-  yr_hash_table_destroy(compiler->sz_table, NULL);
+  if (compiler->wildcard_identifiers_table != NULL)
+    yr_hash_table_destroy(compiler->wildcard_identifiers_table, NULL);
 
-  yr_hash_table_destroy(
-      compiler->objects_table,
-      (YR_HASH_TABLE_FREE_VALUE_FUNC) yr_object_destroy);
+  if (compiler->sz_table != NULL)
+    yr_hash_table_destroy(compiler->sz_table, NULL);
+
+  if (compiler->objects_table != NULL)
+    yr_hash_table_destroy(
+        compiler->objects_table,
+        (YR_HASH_TABLE_FREE_VALUE_FUNC) yr_object_destroy);
 
   if (compiler->atoms_config.free_quality_table)
     yr_free(compiler->atoms_config.quality_table);
@@ -615,6 +646,31 @@ YR_API int yr_compiler_add_fd(
     _yr_compiler_pop_file_name(compiler);
 
   return result;
+}
+
+YR_API int yr_compiler_add_bytes(
+    YR_COMPILER* compiler,
+    const void* rules_data,
+    size_t rules_size,
+    const char* namespace_)
+{
+  // Don't allow calls to yr_compiler_add_bytes() after
+  // yr_compiler_get_rules() has been called.
+  assert(compiler->rules == NULL);
+
+  // Don't allow calls to yr_compiler_add_bytes() if a previous call to
+  // yr_compiler_add_XXXX failed.
+  assert(compiler->errors == 0);
+
+  if (namespace_ != NULL)
+    compiler->last_error = _yr_compiler_set_namespace(compiler, namespace_);
+  else
+    compiler->last_error = _yr_compiler_set_namespace(compiler, "default");
+
+  if (compiler->last_error != ERROR_SUCCESS)
+    return ++compiler->errors;
+
+  return yr_lex_parse_rules_bytes(rules_data, rules_size, compiler);
 }
 
 YR_API int yr_compiler_add_string(
@@ -1000,7 +1056,8 @@ YR_API char* yr_compiler_get_error_message(
     snprintf(buffer, buffer_size, "regular expression is too complex");
     break;
   case ERROR_TOO_MANY_STRINGS:
-    yr_get_configuration(YR_CONFIG_MAX_STRINGS_PER_RULE, &max_strings_per_rule);
+    yr_get_configuration_uint32(
+        YR_CONFIG_MAX_STRINGS_PER_RULE, &max_strings_per_rule);
     snprintf(
         buffer,
         buffer_size,
@@ -1021,7 +1078,32 @@ YR_API char* yr_compiler_get_error_message(
   case ERROR_DUPLICATED_MODIFIER:
     snprintf(buffer, buffer_size, "duplicated modifier");
     break;
+  case ERROR_IDENTIFIER_MATCHES_WILDCARD:
+    snprintf(
+        buffer,
+        buffer_size,
+        "rule identifier \"%s\" matches previously used wildcard rule set",
+        compiler->last_error_extra_info);
+    break;
+  case ERROR_INVALID_VALUE:
+    snprintf(
+        buffer,
+        buffer_size,
+        "invalid value in condition: \"%s\"",
+        compiler->last_error_extra_info);
+    break;
   }
 
   return buffer;
+}
+
+int yr_string_set_destroy(YR_STRING_SET string_set)
+{
+  YR_STRING_SET_ELEMENT* head = string_set.head;
+  while (head != NULL) {
+    YR_STRING_SET_ELEMENT* next_head = head->next;
+    yr_free(head);
+    head = next_head;
+  }
+  return ERROR_SUCCESS;
 }

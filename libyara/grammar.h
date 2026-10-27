@@ -1,4 +1,4 @@
-/* A Bison parser, made by GNU Bison 3.7.6.  */
+/* A Bison parser, made by GNU Bison 3.8.2.  */
 
 /* Bison interface for Yacc-like parsers in C
 
@@ -35,8 +35,8 @@
    especially those whose name start with YY_ or yy_.  They are
    private implementation details that can be changed or removed.  */
 
-#ifndef YY_YARA_YY_GRAMMAR_H_INCLUDED
-# define YY_YARA_YY_GRAMMAR_H_INCLUDED
+#ifndef YY_YARA_YY_LIBYARA_GRAMMAR_H_INCLUDED
+# define YY_YARA_YY_LIBYARA_GRAMMAR_H_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -105,15 +105,16 @@ extern int yara_yydebug;
     _OR_ = 306,                    /* "<or>"  */
     _AND_ = 307,                   /* "<and>"  */
     _NOT_ = 308,                   /* "<not>"  */
-    _EQ_ = 309,                    /* "=="  */
-    _NEQ_ = 310,                   /* "!="  */
-    _LT_ = 311,                    /* "<"  */
-    _LE_ = 312,                    /* "<="  */
-    _GT_ = 313,                    /* ">"  */
-    _GE_ = 314,                    /* ">="  */
-    _SHIFT_LEFT_ = 315,            /* "<<"  */
-    _SHIFT_RIGHT_ = 316,           /* ">>"  */
-    UNARY_MINUS = 317              /* UNARY_MINUS  */
+    _DEFINED_ = 309,               /* "<defined>"  */
+    _EQ_ = 310,                    /* "=="  */
+    _NEQ_ = 311,                   /* "!="  */
+    _LT_ = 312,                    /* "<"  */
+    _LE_ = 313,                    /* "<="  */
+    _GT_ = 314,                    /* ">"  */
+    _GE_ = 315,                    /* ">="  */
+    _SHIFT_LEFT_ = 316,            /* "<<"  */
+    _SHIFT_RIGHT_ = 317,           /* ">>"  */
+    UNARY_MINUS = 318              /* UNARY_MINUS  */
   };
   typedef enum yytokentype yytoken_kind_t;
 #endif
@@ -173,21 +174,22 @@ extern int yara_yydebug;
 #define _OR_ 306
 #define _AND_ 307
 #define _NOT_ 308
-#define _EQ_ 309
-#define _NEQ_ 310
-#define _LT_ 311
-#define _LE_ 312
-#define _GT_ 313
-#define _GE_ 314
-#define _SHIFT_LEFT_ 315
-#define _SHIFT_RIGHT_ 316
-#define UNARY_MINUS 317
+#define _DEFINED_ 309
+#define _EQ_ 310
+#define _NEQ_ 311
+#define _LT_ 312
+#define _LE_ 313
+#define _GT_ 314
+#define _GE_ 315
+#define _SHIFT_LEFT_ 316
+#define _SHIFT_RIGHT_ 317
+#define UNARY_MINUS 318
 
 /* Value type.  */
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 306 "grammar.y"
+#line 346 "libyara/grammar.y"
 
   YR_EXPRESSION   expression;
   SIZED_STRING*   sized_string;
@@ -195,13 +197,15 @@ union YYSTYPE
   int64_t         integer;
   double          double_;
   YR_MODIFIER     modifier;
+  YR_ENUMERATION  enumeration;
+  YR_STRING_SET   string_set;
 
   YR_ARENA_REF tag;
   YR_ARENA_REF rule;
   YR_ARENA_REF meta;
   YR_ARENA_REF string;
 
-#line 205 "grammar.h"
+#line 209 "libyara/grammar.h"
 
 };
 typedef union YYSTYPE YYSTYPE;
@@ -211,6 +215,8 @@ typedef union YYSTYPE YYSTYPE;
 
 
 
+
 int yara_yyparse (void *yyscanner, YR_COMPILER* compiler);
 
-#endif /* !YY_YARA_YY_GRAMMAR_H_INCLUDED  */
+
+#endif /* !YY_YARA_YY_LIBYARA_GRAMMAR_H_INCLUDED  */

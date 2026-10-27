@@ -36,10 +36,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "utils.h"
 
-// Maximum length of file paths. This is the only limit that doesn't have the
-// YR_ prefix. The intention is using the default MAX_PATH if defined.
-#ifndef MAX_PATH
-#define MAX_PATH 1024
+// Maximum length of file paths.
+#ifndef YR_MAX_PATH
+#define YR_MAX_PATH 4096
 #endif
 
 // Maximum number of threads that can use a YR_RULES structure simultaneously.
@@ -82,12 +81,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // must specify the threshold when calling yr_compiler_set_atom_quality_table.
 #ifndef YR_ATOM_QUALITY_WARNING_THRESHOLD
 #define YR_ATOM_QUALITY_WARNING_THRESHOLD \
-  YR_MAX_ATOM_QUALITY - 20 * YR_MAX_ATOM_LENGTH + 38
+  YR_MAX_ATOM_QUALITY - 22 * YR_MAX_ATOM_LENGTH + 38
 #endif
 
 // If a rule generates more than this number of atoms a warning is shown.
 #ifndef YR_ATOMS_PER_RULE_WARNING_THRESHOLD
-#define YR_ATOMS_PER_RULE_WARNING_THRESHOLD 10000
+#define YR_ATOMS_PER_RULE_WARNING_THRESHOLD 12000
 #endif
 
 // Maximum number of nested "for" loops in rule. Rules ith nested loops
@@ -112,6 +111,18 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // the scan will have a CALLBACK_MSG_TOO_MANY_MATCHES.
 #ifndef YR_MAX_STRING_MATCHES
 #define YR_MAX_STRING_MATCHES 1000000
+#endif
+
+// The number of matches before detecting slow scanning. If more matches are
+// found the scan will have a CALLBACK_MSG_TOO_SLOW_SCANNING.
+#ifndef YR_SLOW_STRING_MATCHES
+#define YR_SLOW_STRING_MATCHES 600000
+#endif
+
+// If size of the input is bigger then 0.2 MB and 0-length atoms are used
+// the scan will have a CALLBACK_MSG_TOO_SLOW_SCANNING.
+#ifndef YR_FILE_SIZE_THRESHOLD
+#define YR_FILE_SIZE_THRESHOLD 200000
 #endif
 
 // Maximum number of argument that a function in a YARA module can have.
@@ -158,7 +169,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define RE_MAX_STACK 1024
 #endif
 
-// Maximum input size scanned by yr_re_exec
+// Maximum input size scanned by yr_re_exec and yr_re_fast_exec
 #ifndef YR_RE_SCAN_LIMIT
 #define YR_RE_SCAN_LIMIT 4096
 #endif
@@ -166,6 +177,22 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Maximum number of fibers
 #ifndef RE_MAX_FIBERS
 #define RE_MAX_FIBERS 1024
+#endif
+
+// Maximum code size (in bytes) emitted for a regular expression.
+#ifndef RE_MAX_CODE_SIZE
+#define RE_MAX_CODE_SIZE 32768
+#endif
+
+// Maximum number of extra range unroll iterations during atom extraction from
+// a regular expression.
+#ifndef RE_MAX_RANGE_UNROLL
+#define RE_MAX_RANGE_UNROLL 1024
+#endif
+
+// Maximum number of levels in regexp's AST.
+#ifndef RE_MAX_AST_LEVELS
+#define RE_MAX_AST_LEVELS 2000
 #endif
 
 #endif

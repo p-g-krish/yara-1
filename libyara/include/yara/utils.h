@@ -31,7 +31,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define YR_UTILS_H
 
 #include <limits.h>
-#include <yara/strutils.h>
+#include <yara/integers.h>
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 #ifndef NULL
 #define NULL 0
@@ -56,38 +60,38 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #if defined(_WIN32) || defined(__CYGWIN__)
 #ifdef YR_BUILDING_DLL
 #ifdef __GNUC__
-#define YR_API            EXTERNC __attribute__((dllexport))
-#define YR_DEPRECATED_API EXTERNC __attribute__((deprecated))
-#define YR_DEPRECATED     __attribute__((deprecated))
+#define YR_API                   EXTERNC __attribute__((dllexport))
+#define YR_DEPRECATED_API        EXTERNC __attribute__((deprecated))
+#define YR_DEPRECATED(statement) statement __attribute__((deprecated))
 #else
-#define YR_API            EXTERNC __declspec(dllexport)
-#define YR_DEPRECATED_API EXTERNC __declspec(deprecated)
-#define YR_DEPRECATED     __declspec(deprecated)
+#define YR_API                   EXTERNC __declspec(dllexport)
+#define YR_DEPRECATED_API        EXTERNC __declspec(deprecated)
+#define YR_DEPRECATED(statement) __declspec(deprecated) statement
 #endif
 #elif defined(YR_IMPORTING_DLL)
 #ifdef __GNUC__
-#define YR_API            EXTERNC __attribute__((dllimport))
-#define YR_DEPRECATED_API EXTERNC __attribute__((deprecated))
-#define YR_DEPRECATED     __attribute__((deprecated))
+#define YR_API                   EXTERNC __attribute__((dllimport))
+#define YR_DEPRECATED_API        EXTERNC __attribute__((deprecated))
+#define YR_DEPRECATED(statement) statement __attribute__((deprecated))
 #else
-#define YR_API            EXTERNC __declspec(dllimport)
-#define YR_DEPRECATED_API EXTERNC __declspec(deprecated)
-#define YR_DEPRECATED     __declspec(deprecated)
+#define YR_API                   EXTERNC __declspec(dllimport)
+#define YR_DEPRECATED_API        EXTERNC __declspec(deprecated)
+#define YR_DEPRECATED(statement) __declspec(deprecated) statement
 #endif
 #else
-#define YR_API            EXTERNC
-#define YR_DEPRECATED_API EXTERNC
-#define YR_DEPRECATED
+#define YR_API                   EXTERNC
+#define YR_DEPRECATED_API        EXTERNC
+#define YR_DEPRECATED(statement) statement
 #endif
 #else
 #if __GNUC__ >= 4
-#define YR_API            EXTERNC __attribute__((visibility("default")))
-#define YR_DEPRECATED_API YR_API __attribute__((deprecated))
-#define YR_DEPRECATED     __attribute__((deprecated))
+#define YR_API                   EXTERNC __attribute__((visibility("default")))
+#define YR_DEPRECATED_API        YR_API __attribute__((deprecated))
+#define YR_DEPRECATED(statement) statement __attribute__((deprecated))
 #else
-#define YR_API            EXTERNC
-#define YR_DEPRECATED_API EXTERNC
-#define YR_DEPRECATED
+#define YR_API                   EXTERNC
+#define YR_DEPRECATED_API        EXTERNC
+#define YR_DEPRECATED(statement) statement
 #endif
 #endif
 
@@ -152,5 +156,19 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
    0)
 
 #define YR_BITARRAY_NCHARS(bitnum) (((bitnum) + (CHAR_BIT - 1)) / CHAR_BIT)
+
+static inline int yr_popcount64(uint64_t val)
+{
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_popcountll(val);
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
+  return (int) __popcnt64(val);
+#else
+  val = val - ((val >> 1) & 0x5555555555555555ULL);
+  val = (val & 0x3333333333333333ULL) + ((val >> 2) & 0x3333333333333333ULL);
+  val = (val + (val >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
+  return (int) ((val * 0x0101010101010101ULL) >> 56);
+#endif
+}
 
 #endif

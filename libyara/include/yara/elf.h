@@ -66,11 +66,20 @@ typedef uint64_t elf64_xword_t;
 #define ELF_EM_860         0x0007  // Intel 80860
 #define ELF_EM_MIPS        0x0008  // MIPS I Architecture
 #define ELF_EM_MIPS_RS3_LE 0x000A  // MIPS RS3000 Little-endian
+#define ELF_EM_PARISC      0x000F  // HP PA-RISC
+#define ELF_EM_SPARC32PLUS 0x0012  // Sun's "v8plus"
 #define ELF_EM_PPC         0x0014  // PowerPC
 #define ELF_EM_PPC64       0x0015  // 64-bit PowerPC
+#define ELF_EM_S390        0x0016  // IBM S/390
+#define ELF_EM_MCORE       0x0027  // Motorola M*Core, registered as EM_RCE
 #define ELF_EM_ARM         0x0028  // ARM
+#define ELF_EM_SH          0x002A  // Renesas (formerly Hitachi) SuperH
+#define ELF_EM_SPARCV9     0x002B  // 64-bit SPARC v9
 #define ELF_EM_X86_64      0x003E  // AMD/Intel x86_64
+#define ELF_EM_ARC_COMPACT 0x005D  // ARC International ARCompact
 #define ELF_EM_AARCH64     0x00B7  // 64-bit ARM
+#define ELF_EM_BPF         0x00F7  // Linux BPF in-kernel virtual machine
+#define ELF_EM_LOONGARCH   0x0102  // LoongArch
 
 #define ELF_CLASS_NONE 0x0000
 #define ELF_CLASS_32   0x0001  // 32bit file
@@ -152,6 +161,11 @@ typedef uint64_t elf64_xword_t;
 #define ELF_STT_COMMON  5  // Symbol is a common data object
 #define ELF_STT_TLS     6  // Symbol is thread-local data object
 
+#define ELF_STV_DEFAULT   0  // Visibility by binding
+#define ELF_STV_INTERNAL  1  // Reserved
+#define ELF_STV_HIDDEN    2  // Not visible to other components
+#define ELF_STV_PROTECTED 3  // Visible in other but cannot be preempted.
+
 #define ELF_STB_LOCAL  0  // Local symbol
 #define ELF_STB_GLOBAL 1  // Global symbol
 #define ELF_STB_WEAK   2  // Weak symbol
@@ -161,6 +175,10 @@ typedef uint64_t elf64_xword_t;
 #define ELF_PF_R 0x4  // Segment is readable
 
 #define ELF_PN_XNUM 0xffff
+
+#define ELF_SHN_UNDEF  0       // Missing, undefined section index
+#define ELF_SHN_ABS    0xFFF1  // Absolute references, not affected by relocs
+#define ELF_SHN_COMMON 0xFFF2  // Symbols relative to this are common
 
 #pragma pack(push, 1)
 

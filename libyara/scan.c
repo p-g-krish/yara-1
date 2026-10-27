@@ -55,6 +55,7 @@ typedef struct _CALLBACK_ARGS
 
   int forward_matches;
   int full_word;
+  int xor_key;
 
 } CALLBACK_ARGS;
 
@@ -62,7 +63,8 @@ static int _yr_scan_xor_compare(
     const uint8_t* data,
     size_t data_size,
     uint8_t* string,
-    size_t string_length)
+    size_t string_length,
+    uint8_t* xor_key)
 {
   int result = 0;
   const uint8_t* s1 = data;
@@ -94,6 +96,9 @@ _exit:;
       string_length,
       result);
 
+  if (result > 0)
+    *xor_key = k;
+
   return result;
 }
 
@@ -101,8 +106,10 @@ static int _yr_scan_xor_wcompare(
     const uint8_t* data,
     size_t data_size,
     uint8_t* string,
-    size_t string_length)
+    size_t string_length,
+    uint8_t* xor_key)
 {
+  int result = 0;
   const uint8_t* s1 = data;
   const uint8_t* s2 = string;
   uint8_t k = 0;
@@ -124,7 +131,12 @@ static int _yr_scan_xor_wcompare(
     i++;
   }
 
-  return (int) ((i == string_length) ? i * 2 : 0);
+  result = (int) ((i == string_length) ? i * 2 : 0);
+
+  if (result > 0)
+    *xor_key = k;
+
+  return result;
 }
 
 static int _yr_scan_compare(
@@ -397,7 +409,8 @@ static int _yr_scan_verify_chained_string_match(
     const uint8_t* match_data,
     uint64_t match_base,
     uint64_t match_offset,
-    int32_t match_length)
+    int32_t match_length,
+    uint8_t xor_key)
 {
   YR_DEBUG_FPRINTF(
       2,
@@ -490,7 +503,7 @@ static int _yr_scan_verify_chained_string_match(
     uint32_t max_match_data;
 
     FAIL_ON_ERROR(
-        yr_get_configuration(YR_CONFIG_MAX_MATCH_DATA, &max_match_data))
+        yr_get_configuration_uint32(YR_CONFIG_MAX_MATCH_DATA, &max_match_data))
 
     if (STRING_IS_CHAIN_TAIL(matching_string))
     {
@@ -545,22 +558,36 @@ static int _yr_scan_verify_chained_string_match(
           _yr_scan_remove_match_from_list(
               match, &context->unconfirmed_matches[string->idx]);
 
-          match->match_length = (int32_t)(
-              match_offset - match->offset + match_length);
+          uint64_t full_match_length =
+              match_offset - match->offset + match_length;
+
+          match->match_length = (int32_t) yr_min(
+              full_match_length, (uint64_t) INT32_MAX);
 
           match->data_length = yr_min(
               match->match_length, (int32_t) max_match_data);
 
-          match->data = yr_notebook_alloc(
-              context->matches_notebook, match->data_length);
+          if (match->data_length > 0)
+          {
+            match->data = yr_notebook_alloc(
+                context->matches_notebook, match->data_length);
 
-          if (match->data == NULL)
-            return ERROR_INSUFFICIENT_MEMORY;
+            if (match->data == NULL)
+              return ERROR_INSUFFICIENT_MEMORY;
 
-          memcpy(
-              (void*) match->data,
-              match_data - match_offset + match->offset,
-              match->data_length);
+            memcpy(
+                (void*) match->data,
+                match_data - match_offset + match->offset,
+                match->data_length);
+          }
+          else
+          {
+            match->data = NULL;
+          }
+
+          // Once a string is found, the rule containing that string is
+          // required to be evaluated.
+          yr_bitmask_set(context->required_eval, string->rule_idx);
 
           FAIL_ON_ERROR(_yr_scan_add_match_to_list(
               match, &context->matches[string->idx], false));
@@ -584,6 +611,7 @@ static int _yr_scan_verify_chained_string_match(
       new_match->prev = NULL;
       new_match->next = NULL;
       new_match->is_private = STRING_IS_PRIVATE(matching_string);
+      new_match->xor_key = xor_key;
 
       // A copy of the matching data is written to the matches_arena, the
       // amount of data copies is limited by YR_CONFIG_MAX_MATCH_DATA.
@@ -630,6 +658,9 @@ static int _yr_scan_match_callback(
 
   int result = ERROR_SUCCESS;
 
+  if (match_data < callback_args->data)
+    return ERROR_INTERNAL_FATAL_ERROR;
+
   size_t match_offset = match_data - callback_args->data;
 
   YR_DEBUG_FPRINTF(
@@ -653,7 +684,12 @@ static int _yr_scan_match_callback(
   match_length += callback_args->forward_matches;
 
   // make sure that match fits into the data.
-  assert(match_offset + match_length <= callback_args->data_size);
+  if (match_length < 0 ||
+      match_offset > callback_args->data_size ||
+      (size_t) match_length > callback_args->data_size - match_offset)
+  {
+    return ERROR_INTERNAL_FATAL_ERROR;
+  }
 
   if (callback_args->full_word)
   {
@@ -687,14 +723,15 @@ static int _yr_scan_match_callback(
         match_data,
         callback_args->data_base,
         match_offset,
-        match_length);
+        match_length,
+        callback_args->xor_key);
   }
   else
   {
     uint32_t max_match_data;
 
     FAIL_ON_ERROR(
-        yr_get_configuration(YR_CONFIG_MAX_MATCH_DATA, &max_match_data));
+        yr_get_configuration_uint32(YR_CONFIG_MAX_MATCH_DATA, &max_match_data));
 
     new_match = yr_notebook_alloc(
         callback_args->context->matches_notebook, sizeof(YR_MATCH));
@@ -733,6 +770,9 @@ static int _yr_scan_match_callback(
       new_match->prev = NULL;
       new_match->next = NULL;
       new_match->is_private = STRING_IS_PRIVATE(string);
+      new_match->xor_key = callback_args->xor_key;
+
+      yr_bitmask_set(callback_args->context->required_eval, string->rule_idx);
 
       FAIL_ON_ERROR(_yr_scan_add_match_to_list(
           new_match,
@@ -780,8 +820,6 @@ static int _yr_scan_verify_re_match(
   CALLBACK_ARGS callback_args;
   RE_EXEC_FUNC exec;
 
-  int forward_matches = -1;
-  int backward_matches = -1;
   int flags = 0;
 
   if (STRING_IS_GREEDY_REGEXP(ac_match->string))
@@ -798,7 +836,21 @@ static int _yr_scan_verify_re_match(
   else
     exec = yr_re_exec;
 
-  if (STRING_IS_ASCII(ac_match->string) || STRING_IS_BASE64(ac_match->string) ||
+  callback_args.string = ac_match->string;
+  callback_args.context = context;
+  callback_args.data = data;
+  callback_args.data_size = data_size;
+  callback_args.data_base = data_base;
+  callback_args.forward_matches = -1;
+  callback_args.full_word = STRING_IS_FULL_WORD(ac_match->string);
+  // xor modifier is not valid for RE but set it so we don't leak stack values.
+  callback_args.xor_key = 0;
+
+  if (STRING_IS_ASCII(ac_match->string) ||
+      // The base64 and base64wide are not supported in regexps, but strings
+      // with these modifiers are converted to a regexp with three
+      // alternatives.
+      STRING_IS_BASE64(ac_match->string) ||
       STRING_IS_BASE64_WIDE(ac_match->string))
   {
     FAIL_ON_ERROR(exec(
@@ -810,57 +862,59 @@ static int _yr_scan_verify_re_match(
         flags,
         NULL,
         NULL,
-        &forward_matches));
+        &callback_args.forward_matches));
+
+    if (callback_args.forward_matches != -1 && ac_match->backward_code != NULL)
+    {
+      FAIL_ON_ERROR(exec(
+          context,
+          ac_match->backward_code,
+          data + offset,
+          data_size - offset,
+          offset,
+          flags | RE_FLAGS_BACKWARDS | RE_FLAGS_EXHAUSTIVE,
+          _yr_scan_match_callback,
+          (void*) &callback_args,
+          NULL));
+    }
+    else if (callback_args.forward_matches >= 0)
+    {
+      FAIL_ON_ERROR(
+          _yr_scan_match_callback(data + offset, 0, flags, &callback_args));
+    }
   }
 
-  if ((forward_matches == -1) && (STRING_IS_WIDE(ac_match->string) &&
-                                  !(STRING_IS_BASE64(ac_match->string) ||
-                                    STRING_IS_BASE64_WIDE(ac_match->string))))
+  if (STRING_IS_WIDE(ac_match->string))
   {
-    flags |= RE_FLAGS_WIDE;
     FAIL_ON_ERROR(exec(
         context,
         ac_match->forward_code,
         data + offset,
         data_size - offset,
         offset,
-        flags,
+        flags | RE_FLAGS_WIDE,
         NULL,
         NULL,
-        &forward_matches));
-  }
+        &callback_args.forward_matches));
 
-  if (forward_matches == -1)
-    return ERROR_SUCCESS;
-
-  if (forward_matches == 0 && ac_match->backward_code == NULL)
-    return ERROR_SUCCESS;
-
-  callback_args.string = ac_match->string;
-  callback_args.context = context;
-  callback_args.data = data;
-  callback_args.data_size = data_size;
-  callback_args.data_base = data_base;
-  callback_args.forward_matches = forward_matches;
-  callback_args.full_word = STRING_IS_FULL_WORD(ac_match->string);
-
-  if (ac_match->backward_code != NULL)
-  {
-    FAIL_ON_ERROR(exec(
-        context,
-        ac_match->backward_code,
-        data + offset,
-        data_size - offset,
-        offset,
-        flags | RE_FLAGS_BACKWARDS | RE_FLAGS_EXHAUSTIVE,
-        _yr_scan_match_callback,
-        (void*) &callback_args,
-        &backward_matches));
-  }
-  else
-  {
-    FAIL_ON_ERROR(
-        _yr_scan_match_callback(data + offset, 0, flags, &callback_args));
+    if (callback_args.forward_matches != -1 && ac_match->backward_code != NULL)
+    {
+      FAIL_ON_ERROR(exec(
+          context,
+          ac_match->backward_code,
+          data + offset,
+          data_size - offset,
+          offset,
+          flags | RE_FLAGS_WIDE | RE_FLAGS_BACKWARDS | RE_FLAGS_EXHAUSTIVE,
+          _yr_scan_match_callback,
+          (void*) &callback_args,
+          NULL));
+    }
+    else if (callback_args.forward_matches >= 0)
+    {
+      FAIL_ON_ERROR(
+          _yr_scan_match_callback(data + offset, 0, flags, &callback_args));
+    }
   }
 
   return ERROR_SUCCESS;
@@ -886,6 +940,7 @@ static int _yr_scan_verify_literal_match(
 
   int flags = 0;
   int forward_matches = 0;
+  uint8_t xor_key = 0;
 
   CALLBACK_ARGS callback_args;
   YR_STRING* string = ac_match->string;
@@ -893,6 +948,28 @@ static int _yr_scan_verify_literal_match(
   if (STRING_FITS_IN_ATOM(string))
   {
     forward_matches = ac_match->backtrack;
+    if (STRING_IS_XOR(string))
+    {
+      if (STRING_IS_WIDE(string))
+      {
+        _yr_scan_xor_wcompare(
+            data + offset,
+            data_size - offset,
+            string->string,
+            string->length,
+            &xor_key);
+      }
+
+      if (STRING_IS_ASCII(string))
+      {
+        _yr_scan_xor_compare(
+            data + offset,
+            data_size - offset,
+            string->string,
+            string->length,
+            &xor_key);
+      }
+    }
   }
   else if (STRING_IS_NO_CASE(string))
   {
@@ -927,13 +1004,21 @@ static int _yr_scan_verify_literal_match(
       if (STRING_IS_WIDE(string))
       {
         forward_matches = _yr_scan_xor_wcompare(
-            data + offset, data_size - offset, string->string, string->length);
+            data + offset,
+            data_size - offset,
+            string->string,
+            string->length,
+            &xor_key);
       }
 
       if (forward_matches == 0)
       {
         forward_matches = _yr_scan_xor_compare(
-            data + offset, data_size - offset, string->string, string->length);
+            data + offset,
+            data_size - offset,
+            string->string,
+            string->length,
+            &xor_key);
       }
     }
   }
@@ -954,6 +1039,7 @@ static int _yr_scan_verify_literal_match(
   callback_args.data_base = data_base;
   callback_args.forward_matches = forward_matches;
   callback_args.full_word = STRING_IS_FULL_WORD(string);
+  callback_args.xor_key = xor_key;
 
   FAIL_ON_ERROR(
       _yr_scan_match_callback(data + offset, 0, flags, &callback_args));
@@ -990,25 +1076,6 @@ int yr_scan_verify_match(
   if (yr_bitmask_is_set(context->strings_temp_disabled, string->idx))
     return ERROR_SUCCESS;
 
-  if (context->matches[string->idx].count == YR_MAX_STRING_MATCHES)
-  {
-    result = callback(
-        context,
-        CALLBACK_MSG_TOO_MANY_MATCHES,
-        (void*) string,
-        context->user_data);
-
-    if (result == CALLBACK_CONTINUE)
-    {
-      yr_bitmask_set(context->strings_temp_disabled, string->idx);
-      return ERROR_SUCCESS;
-    }
-    else if (result == CALLBACK_ABORT || result == CALLBACK_ERROR)
-      return ERROR_TOO_MANY_MATCHES;
-    else
-      return ERROR_INTERNAL_FATAL_ERROR;
-  }
-
   if (context->flags & SCAN_FLAGS_FAST_MODE && STRING_IS_SINGLE_MATCH(string) &&
       context->matches[string->idx].head != NULL)
     return ERROR_SUCCESS;
@@ -1036,6 +1103,31 @@ int yr_scan_verify_match(
   {
     result = _yr_scan_verify_re_match(
         context, ac_match, data, data_size, data_base, offset);
+  }
+
+  // If _yr_scan_verify_literal_match or _yr_scan_verify_re_match return
+  // ERROR_TOO_MANY_MATCHES call the callback with CALLBACK_MSG_TOO_MANY_MATCHES
+  // in order to ask what to do. If the callback returns CALLBACK_CONTINUE
+  // this error is ignored, if not, the error is propagated to the caller.
+  if (result == ERROR_TOO_MANY_MATCHES)
+  {
+    result = callback(
+        context,
+        CALLBACK_MSG_TOO_MANY_MATCHES,
+        (void*) string,
+        context->user_data);
+
+    switch (result)
+    {
+    case CALLBACK_CONTINUE:
+      yr_bitmask_set(context->strings_temp_disabled, string->idx);
+      result = ERROR_SUCCESS;
+      break;
+
+    default:
+      result = ERROR_TOO_MANY_MATCHES;
+      break;
+    }
   }
 
 #ifdef YR_PROFILING_ENABLED

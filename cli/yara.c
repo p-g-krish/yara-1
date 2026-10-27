@@ -1,4 +1,4 @@
-﻿/*
+/*
 Copyright (c) 2007-2021. The YARA Authors. All Rights Reserved.
 
 Redistribution and use in source and binary forms, with or without modification,
@@ -62,10 +62,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "unicode.h"
 
 #define ERROR_COULD_NOT_CREATE_THREAD 100
-
-#ifndef MAX_PATH
-#define MAX_PATH 256
-#endif
 
 #ifndef min
 #define min(x, y) ((x < y) ? (x) : (y))
@@ -147,7 +143,9 @@ static bool show_tags = false;
 static bool show_stats = false;
 static bool show_strings = false;
 static bool show_string_length = false;
+static bool show_xor_key = false;
 static bool show_meta = false;
+static bool show_module_names = false;
 static bool show_namespace = false;
 static bool show_version = false;
 static bool show_help = false;
@@ -155,14 +153,18 @@ static bool ignore_warnings = false;
 static bool fast_scan = false;
 static bool negate = false;
 static bool print_count_only = false;
+static bool strict_escape = false;
 static bool fail_on_warnings = false;
 static bool rules_are_compiled = false;
+static bool disable_console_logs = false;
 static long total_count = 0;
 static long limit = 0;
 static long timeout = 1000000;
 static long stack_size = DEFAULT_STACK_SIZE;
 static long threads = YR_MAX_THREADS;
 static long max_strings_per_rule = DEFAULT_MAX_STRINGS_PER_RULE;
+static long max_process_memory_chunk = DEFAULT_MAX_PROCESS_MEMORY_CHUNK;
+static long long skip_larger = 0;
 
 #define USAGE_STRING \
   "Usage: yara [OPTION]... [NAMESPACE:]RULES_FILE... FILE | DIR | PID"
@@ -187,6 +189,12 @@ args_option_t options[] = {
         &print_count_only,
         _T("print only number of matches")),
 
+    OPT_BOOLEAN(
+        'E',
+        _T("strict-escape"),
+        &strict_escape,
+        _T("warn on unknown escape sequences")),
+
     OPT_STRING_MULTI(
         'd',
         _T("define"),
@@ -194,6 +202,12 @@ args_option_t options[] = {
         MAX_ARGS_EXT_VAR,
         _T("define external variable"),
         _T("VAR=VALUE")),
+
+    OPT_BOOLEAN(
+        'q',
+        _T("disable-console-logs"),
+        &disable_console_logs,
+        _T("disable printing console log messages")),
 
     OPT_BOOLEAN(
         0,
@@ -213,14 +227,22 @@ args_option_t options[] = {
         _T("print only rules named IDENTIFIER"),
         _T("IDENTIFIER")),
 
-    OPT_INTEGER(
+    OPT_LONG(
+        0,
+        _T("max-process-memory-chunk"),
+        &max_process_memory_chunk,
+        _T("set maximum chunk size while reading process memory")
+        _T(" (default=1073741824)"),
+        _T("NUMBER")),
+
+    OPT_LONG(
         'l',
         _T("max-rules"),
         &limit,
         _T("abort scanning after matching a NUMBER of rules"),
         _T("NUMBER")),
 
-    OPT_INTEGER(
+    OPT_LONG(
         0,
         _T("max-strings-per-rule"),
         &max_strings_per_rule,
@@ -243,6 +265,12 @@ args_option_t options[] = {
         NULL),
 
     OPT_BOOLEAN(
+        'N',
+        _T("no-follow-symlinks"),
+        &follow_symlinks,
+        _T("do not follow symlinks when scanning")),
+
+    OPT_BOOLEAN(
         'w',
         _T("no-warnings"),
         &ignore_warnings,
@@ -255,6 +283,12 @@ args_option_t options[] = {
         _T("print-module-data"),
         &show_module_data,
         _T("print module data")),
+
+    OPT_BOOLEAN(
+        'M',
+        _T("module-names"),
+        &show_module_names,
+        _T("show module names")),
 
     OPT_BOOLEAN(
         'e',
@@ -280,6 +314,12 @@ args_option_t options[] = {
         &show_string_length,
         _T("print length of matched strings")),
 
+    OPT_BOOLEAN(
+        'X',
+        _T("print-xor-key"),
+        &show_xor_key,
+        _T("print xor key and plaintext of matched strings")),
+
     OPT_BOOLEAN('g', _T("print-tags"), &show_tags, _T("print tags")),
 
     OPT_BOOLEAN(
@@ -289,18 +329,19 @@ args_option_t options[] = {
         _T("recursively search directories")),
 
     OPT_BOOLEAN(
-        'N',
-        _T("no-follow-symlinks"),
-        &follow_symlinks,
-        _T("do not follow symlinks when scanning")),
-
-    OPT_BOOLEAN(
         0,
         _T("scan-list"),
         &scan_list_search,
         _T("scan files listed in FILE, one per line")),
 
-    OPT_INTEGER(
+    OPT_LONG_LONG(
+        'z',
+        _T("skip-larger"),
+        &skip_larger,
+        _T("skip files larger than the given size when scanning a directory"),
+        _T("NUMBER")),
+
+    OPT_LONG(
         'k',
         _T("stack-size"),
         &stack_size,
@@ -315,14 +356,14 @@ args_option_t options[] = {
         _T("print only rules tagged as TAG"),
         _T("TAG")),
 
-    OPT_INTEGER(
+    OPT_LONG(
         'p',
         _T("threads"),
         &threads,
         _T("use the specified NUMBER of threads to scan a directory"),
         _T("NUMBER")),
 
-    OPT_INTEGER(
+    OPT_LONG(
         'a',
         _T("timeout"),
         &timeout,
@@ -446,9 +487,9 @@ static bool is_directory(const char_t* path)
 static int scan_dir(const char_t* dir, SCAN_OPTIONS* scan_opts)
 {
   int result = ERROR_SUCCESS;
-  char_t path[MAX_PATH];
+  char_t path[YR_MAX_PATH];
 
-  _sntprintf(path, MAX_PATH, _T("%s\\*"), dir);
+  _sntprintf(path, YR_MAX_PATH, _T("%s\\*"), dir);
 
   WIN32_FIND_DATA FindFileData;
   HANDLE hFind = FindFirstFile(path, &FindFileData);
@@ -457,11 +498,37 @@ static int scan_dir(const char_t* dir, SCAN_OPTIONS* scan_opts)
   {
     do
     {
-      _sntprintf(path, MAX_PATH, _T("%s\\%s"), dir, FindFileData.cFileName);
+      _sntprintf(path, YR_MAX_PATH, _T("%s\\%s"), dir, FindFileData.cFileName);
+
+      // If symbolic links must not be followed, and this entry is a symbolic
+      // link, ignore it and continue with the next one.
+      if (!scan_opts->follow_symlinks && 
+          FindFileData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) 
+      {
+        continue;
+      }
 
       if (!(FindFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
       {
-        result = file_queue_put(path, scan_opts->deadline);
+        LARGE_INTEGER file_size;
+
+        file_size.HighPart = FindFileData.nFileSizeHigh;
+        file_size.LowPart = FindFileData.nFileSizeLow;
+
+        if (skip_larger > file_size.QuadPart || skip_larger <= 0)
+        {
+          result = file_queue_put(path, scan_opts->deadline);
+        }
+        else if (!ignore_warnings)
+        {
+          _ftprintf(
+              stderr,
+              _T("skipping %s (%" PRIu64
+                 " bytes) because it's larger than %lld bytes.\n"),
+              path,
+              file_size.QuadPart,
+              skip_larger);
+        }
       }
       else if (
           scan_opts->recursive_search &&
@@ -608,12 +675,14 @@ static int scan_dir(const char* dir, SCAN_OPTIONS* scan_opts)
   {
     struct dirent* de = readdir(dp);
 
+    char* full_path = calloc(YR_MAX_PATH, sizeof(char));
+    const size_t full_path_size = YR_MAX_PATH * sizeof(char);
+
     while (de && result != ERROR_SCAN_TIMEOUT)
     {
-      char full_path[MAX_PATH];
       struct stat st;
 
-      snprintf(full_path, sizeof(full_path), "%s/%s", dir, de->d_name);
+      snprintf(full_path, full_path_size, "%s/%s", dir, de->d_name);
 
       int err = lstat(full_path, &st);
 
@@ -625,14 +694,15 @@ static int scan_dir(const char* dir, SCAN_OPTIONS* scan_opts)
         de = readdir(dp);
         continue;
       }
-      // If the directory entry is a symlink, check if it points to . and
-      // skip it in that case.
+      // If the directory entry is a symlink, check if it points to . or .. and
+      // skip it in those cases.
       else if (S_ISLNK(st.st_mode))
       {
         char buf[2];
         int len = readlink(full_path, buf, sizeof(buf));
 
-        if (len == 1 && buf[0] == '.')
+        if ((len == 1 && buf[0] == '.') ||
+            (len == 2 && buf[0] == '.' && buf[1] == '.'))
         {
           de = readdir(dp);
           continue;
@@ -645,7 +715,20 @@ static int scan_dir(const char* dir, SCAN_OPTIONS* scan_opts)
       {
         if (S_ISREG(st.st_mode))
         {
-          result = file_queue_put(full_path, scan_opts->deadline);
+          if (skip_larger > st.st_size || skip_larger <= 0)
+          {
+            result = file_queue_put(full_path, scan_opts->deadline);
+          }
+          else if (!ignore_warnings)
+          {
+            fprintf(
+                stderr,
+                "skipping %s (%" PRId64 " bytes) because it's larger than %lld"
+                " bytes.\n",
+                full_path,
+                st.st_size,
+                skip_larger);
+          }
         }
         else if (
             scan_opts->recursive_search && S_ISDIR(st.st_mode) &&
@@ -658,6 +741,7 @@ static int scan_dir(const char* dir, SCAN_OPTIONS* scan_opts)
       de = readdir(dp);
     }
 
+    free(full_path);
     closedir(dp);
   }
 
@@ -717,14 +801,15 @@ static int populate_scan_list(const char* filename, SCAN_OPTIONS* scan_opts)
 
 #endif
 
-static void print_string(const uint8_t* data, int length)
+static void print_string(const uint8_t* data, int length, uint8_t xor_key)
 {
   for (int i = 0; i < length; i++)
   {
-    if (data[i] >= 32 && data[i] <= 126)
-      _tprintf(_T("%c"), data[i]);
+    uint8_t c = data[i] ^ xor_key;
+    if (c >= 32 && c <= 126)
+      _tprintf(_T("%c"), c);
     else
-      _tprintf(_T("\\x%02X"), data[i]);
+      _tprintf(_T("\\x%02X"), c);
   }
 }
 
@@ -733,7 +818,7 @@ static char cescapes[] = {
     0, 0, 0, 0, 0, 0, 0, 0,   0,   0,   0,   0,   0,   0,   0, 0,
 };
 
-static void print_escaped(const uint8_t* data, size_t length)
+static void print_escaped_data(const uint8_t* data, size_t length)
 {
   for (size_t i = 0; i < length; i++)
   {
@@ -756,6 +841,20 @@ static void print_escaped(const uint8_t* data, size_t length)
         _tprintf(_T("\\%03o"), data[i]);
     }
   }
+}
+
+void print_escaped_file_path(const char_t* str) {
+    for (size_t i = 0; str[i] != '\0'; ++i) {
+        if (str[i] == _T('\n')) {
+            _tprintf(_T("\\n"));
+        } else if (str[i] == _T('\r')) {
+            _tprintf(_T("\\r"));
+        }
+        else {
+            _tprintf(_T("%c"), str[i]);
+        }
+    }
+    _tprintf(_T("\n"));
 }
 
 static void print_hex_string(const uint8_t* data, int length)
@@ -1021,7 +1120,7 @@ static int handle_message(
         else
         {
           _tprintf(_T("%" PF_S "=\""), meta->identifier);
-          print_escaped((uint8_t*) (meta->string), strlen(meta->string));
+          print_escaped_data((uint8_t*) (meta->string), strlen(meta->string));
           _tprintf(_T("\""));
         }
       }
@@ -1029,11 +1128,11 @@ static int handle_message(
       _tprintf(_T("] "));
     }
 
-    _tprintf(_T("%s\n"), ((CALLBACK_ARGS*) data)->file_path);
+    print_escaped_file_path(((CALLBACK_ARGS*) data)->file_path);
 
     // Show matched strings.
 
-    if (show_strings || show_string_length)
+    if (show_strings || show_string_length || show_xor_key)
     {
       YR_STRING* string;
 
@@ -1055,6 +1154,13 @@ static int handle_message(
                 match->base + match->offset,
                 string->identifier);
 
+          if (show_xor_key)
+          {
+            _tprintf(_T(":xor(0x%02x,"), match->xor_key);
+            print_string(match->data, match->data_length, match->xor_key);
+            _tprintf(_T(")"));
+          }
+
           if (show_strings)
           {
             _tprintf(_T(": "));
@@ -1062,7 +1168,7 @@ static int handle_message(
             if (STRING_IS_HEX(string))
               print_hex_string(match->data, match->data_length);
             else
-              print_string(match->data, match->data_length);
+              print_string(match->data, match->data_length, 0);
           }
 
           _tprintf(_T("\n"));
@@ -1133,6 +1239,9 @@ static int callback(
 #if defined(_WIN32)
       // In Windows restore stdout to normal text mode as yr_object_print_data
       // calls printf which is not supported in UTF-8 mode.
+      // Explicitly flush the buffer before the switch in case we already
+      // printed something and it haven't been flushed automatically.
+      fflush(stdout);
       _setmode(_fileno(stdout), _O_TEXT);
 #endif
 
@@ -1141,11 +1250,36 @@ static int callback(
 
 #if defined(_WIN32)
       // Go back to UTF-8 mode.
+      // Explicitly flush the buffer before the switch in case we already
+      // printed something and it haven't been flushed automatically.
+      fflush(stdout);
       _setmode(_fileno(stdout), _O_U8TEXT);
 #endif
 
       cli_mutex_unlock(&output_mutex);
     }
+
+    return CALLBACK_CONTINUE;
+
+  case CALLBACK_MSG_TOO_SLOW_SCANNING:
+    if (ignore_warnings)
+      return CALLBACK_CONTINUE;
+
+    string = (YR_STRING*) message_data;
+    rule = &context->rules->rules_table[string->rule_idx];
+
+    if (rule != NULL && string != NULL)
+      fprintf(
+          stderr,
+          "warning: rule \"%s\": scanning with string %s is taking a very long "
+          "time, it is either too general or very common.\n",
+          rule->identifier,
+          string->identifier);
+    else
+      return CALLBACK_CONTINUE;
+
+    if (fail_on_warnings)
+      return CALLBACK_ERROR;
 
     return CALLBACK_CONTINUE;
 
@@ -1166,6 +1300,11 @@ static int callback(
     if (fail_on_warnings)
       return CALLBACK_ERROR;
 
+    return CALLBACK_CONTINUE;
+
+  case CALLBACK_MSG_CONSOLE_LOG:
+    if (!disable_console_logs)
+      _tprintf(_T("%" PF_S "\n"), (char*) message_data);
     return CALLBACK_CONTINUE;
   }
 
@@ -1242,6 +1381,8 @@ static int load_modules_data()
 
     if (module_data != NULL)
     {
+      module_data->module_name = modules_data[i];
+
       int result = yr_filemap_map(equal_sign + 1, &module_data->mapped_file);
 
       if (result != ERROR_SUCCESS)
@@ -1312,7 +1453,7 @@ int _tmain(int argc, const char_t** argv)
         YR_VERSION,
         USAGE_STRING);
 
-    args_print_usage(options, 40);
+    args_print_usage(options, 43);
     printf(
         "\nSend bug reports and suggestions to: vmalvarez@virustotal.com.\n");
 
@@ -1323,6 +1464,18 @@ int _tmain(int argc, const char_t** argv)
   {
     fprintf(stderr, "maximum number of threads is %d\n", YR_MAX_THREADS);
     return EXIT_FAILURE;
+  }
+
+  // This can be done before yr_initialize() because we aren't calling any
+  // module functions, just accessing the name pointer for each module.
+  if (show_module_names)
+  {
+    for (YR_MODULE* module = yr_modules_get_table(); module->name != NULL;
+         module++)
+    {
+      printf("%s\n", module->name);
+    }
+    return EXIT_SUCCESS;
   }
 
   if (argc < 2)
@@ -1357,8 +1510,13 @@ int _tmain(int argc, const char_t** argv)
     exit_with_code(EXIT_FAILURE);
   }
 
-  yr_set_configuration(YR_CONFIG_STACK_SIZE, &stack_size);
-  yr_set_configuration(YR_CONFIG_MAX_STRINGS_PER_RULE, &max_strings_per_rule);
+  yr_set_configuration_uint32(YR_CONFIG_STACK_SIZE, (uint32_t) stack_size);
+
+  yr_set_configuration_uint32(
+      YR_CONFIG_MAX_STRINGS_PER_RULE, (uint32_t) max_strings_per_rule);
+
+  yr_set_configuration_uint64(
+      YR_CONFIG_MAX_PROCESS_MEMORY_CHUNK, max_process_memory_chunk);
 
   // Try to load the rules file as a binary file containing
   // compiled rules first
@@ -1402,7 +1560,6 @@ int _tmain(int argc, const char_t** argv)
       result = ERROR_COULD_NOT_OPEN_FILE;
     }
   }
-
   else
   {
     // Rules file didn't contain compiled rules, let's handle it
@@ -1436,6 +1593,11 @@ int _tmain(int argc, const char_t** argv)
     cr.warnings = 0;
 
     yr_compiler_set_callback(compiler, print_compiler_error, &cr);
+
+    if (strict_escape)
+      compiler->strict_escape = true;
+    else
+      compiler->strict_escape = false;
 
     if (!compile_files(compiler, argc, argv))
       exit_with_code(EXIT_FAILURE);
@@ -1520,9 +1682,6 @@ int _tmain(int argc, const char_t** argv)
     else
     {
       result = populate_scan_list(argv[argc - 1], &scan_opts);
-
-      if (result != ERROR_SUCCESS)
-        exit_with_code(EXIT_FAILURE);
     }
 
     file_queue_finish();
@@ -1534,6 +1693,9 @@ int _tmain(int argc, const char_t** argv)
       yr_scanner_destroy(thread_args[i].scanner);
 
     file_queue_destroy();
+
+    if (result != ERROR_SUCCESS)
+      exit_with_code(EXIT_FAILURE);
   }
   else
   {
@@ -1558,7 +1720,7 @@ int _tmain(int argc, const char_t** argv)
     if (result == ERROR_COULD_NOT_OPEN_FILE)
     {
       // Is it a PID? To be a PID it must be made up entirely of digits.
-      char* endptr = NULL;
+      char_t* endptr = NULL;
       long pid = _tcstol(argv[argc - 1], &endptr, 10);
 
       if (pid > 0 && argv[argc - 1] != NULL && *endptr == '\x00')

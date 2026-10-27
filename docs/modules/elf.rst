@@ -69,11 +69,21 @@ Reference
     .. c:type:: EM_860
     .. c:type:: EM_MIPS
     .. c:type:: EM_MIPS_RS3_LE
+    .. c:type:: EM_PARISC
+    .. c:type:: EM_SPARC32PLUS
     .. c:type:: EM_PPC
     .. c:type:: EM_PPC64
+    .. c:type:: EM_S390
+    .. c:type:: EM_MCORE
+    .. c:type:: EM_RCE
     .. c:type:: EM_ARM
+    .. c:type:: EM_SH
+    .. c:type:: EM_SPARCV9
     .. c:type:: EM_X86_64
+    .. c:type:: EM_ARC_COMPACT
     .. c:type:: EM_AARCH64
+    .. c:type:: EM_BPF
+    .. c:type:: EM_LOONGARCH
 
     *Example: elf.machine == elf.EM_X86_64*
 
@@ -371,6 +381,17 @@ Reference
 
         The section index which the symbol is associated with.
 
+.. c:function:: telfhash()
+
+    Function returning Telfhash - TLSH hash of the ELF export and import symbols.
+
+     *Example: elf.telfhash() == "t166a00284751084526486df8b5df5b2fccb3f511dbc188c37156f5e714a11bc5d71014d"*
+
+.. c:function:: import_md5()
+
+    Function returning Import Hash - MD5 hash of the ELF imported symbols.
+
+     *Example: elf.import_md5() == "c3eca50cbb03400a6e91b9fe48da0c0c"*
 
 
 

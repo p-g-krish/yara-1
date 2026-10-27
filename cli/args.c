@@ -27,8 +27,6 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include "args.h"
-
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,11 +96,25 @@ args_error_type_t args_parse_option(
     *(bool*) opt->value = !(*(bool*) opt->value);
     break;
 
-  case ARGS_OPT_INTEGER:
+  case ARGS_OPT_LONG:
     if (opt_arg == NULL)
       return ARGS_ERROR_REQUIRED_INTEGER_ARG;
 
     *(long*) opt->value = _tcstol(opt_arg, &endptr, 0);
+
+    if (*endptr != '\0')
+      return ARGS_ERROR_REQUIRED_INTEGER_ARG;
+
+    if (opt_arg_was_used != NULL)
+      *opt_arg_was_used = 1;
+
+    break;
+
+  case ARGS_OPT_LONG_LONG:
+    if (opt_arg == NULL)
+      return ARGS_ERROR_REQUIRED_INTEGER_ARG;
+
+    *(long long*) opt->value = _tcstoll(opt_arg, &endptr, 0);
 
     if (*endptr != '\0')
       return ARGS_ERROR_REQUIRED_INTEGER_ARG;
@@ -245,9 +257,6 @@ int args_parse(args_option_t* options, int argc, const char_t** argv)
     i++;
   }
 
-  // Initialize to NULL the value pointers for all options.
-  for (; options->type != ARGS_OPT_END; options++) options->value = NULL;
-
   return o;
 }
 
@@ -270,7 +279,8 @@ void args_print_usage(args_option_t* options, int help_alignment)
     if (options->long_name != NULL)
       len += _stprintf(buffer + len, _T("--%s"), options->long_name);
 
-    if (options->type == ARGS_OPT_STRING || options->type == ARGS_OPT_INTEGER)
+    if (options->type == ARGS_OPT_STRING || options->type == ARGS_OPT_LONG ||
+        options->type == ARGS_OPT_LONG_LONG)
     {
       len += _stprintf(
           buffer + len,
@@ -285,11 +295,21 @@ void args_print_usage(args_option_t* options, int help_alignment)
 
 void args_free(args_option_t* options)
 {
+#ifdef _UNICODE
+  // On Windows the string values stored by args_parse_option are ANSI
+  // copies allocated by unicode_to_ansi(), so they must be released here.
+  // On non-Windows builds the string values point directly into argv,
+  // there's nothing to free.
   for (; options->type != ARGS_OPT_END; options++)
   {
-    if (options->type == ARGS_OPT_STRING && options->value != NULL)
-    {
-      free(options->value);
-    }
+    if (options->type != ARGS_OPT_STRING || options->value == NULL)
+      continue;
+
+    char** strings = (char**) options->value;
+
+    for (int i = 0; i < options->count; i++) free(strings[i]);
   }
+#else
+  (void) options;
+#endif
 }

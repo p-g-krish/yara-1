@@ -97,7 +97,7 @@ file and create signatures based on those results.
     Returns true if the *test* value is between *lower* and *upper* values. The
     comparisons are inclusive.
 
-    *Example: math.in_range(math.deviation(0, filesize, math.MEAN_BYTES), 63.9, 64,1)*
+    *Example: math.in_range(math.deviation(0, filesize, math.MEAN_BYTES), 63.9, 64.1)*
 
 .. c:function:: max(int, int)
 
@@ -126,3 +126,65 @@ file and create signatures based on those results.
     Returns the absolute value of the signed integer.
 
     *Example: math.abs(@a - @b) == 1*
+
+.. c:function:: count(byte, offset, size)
+
+    .. versionadded:: 4.2.0
+
+    Returns how often a specific byte occurs, starting at *offset*
+    and looking at the next *size* bytes. When scanning a
+    running process the *offset* argument should be a virtual address within
+    the process address space.
+    *offset* and *size* are optional; if left empty, the complete file is searched.
+
+    *Example: math.count(0x4A) >= 10*
+
+    *Example: math.count(0x00, 0, 4) < 2*
+
+.. c:function:: percentage(byte, offset, size)
+
+    .. versionadded:: 4.2.0
+
+    Returns the occurrence rate of a specific byte, starting at *offset*
+    and looking at the next *size* bytes. When scanning a
+    running process the *offset* argument should be a virtual address within
+    the process address space. The returned value is a float between 0 and 1.
+    *offset* and *size* are optional; if left empty, the complete file is searched.
+
+
+    *Example: math.percentage(0xFF, filesize-1024, filesize) >= 0.9*
+
+    *Example: math.percentage(0x4A) >= 0.4*
+
+.. c:function:: mode(offset, size)
+
+    .. versionadded:: 4.2.0
+
+    Returns the most common byte, starting at *offset* and looking at the next
+    *size* bytes. When scanning a
+    running process the *offset* argument should be a virtual address within
+    the process address space. The returned value is a float.
+    *offset* and *size* are optional; if left empty, the complete file is searched.
+
+    *Example: math.mode(0, filesize) == 0xFF*
+
+    *Example: math.mode() == 0x00*
+
+.. c:function:: to_string(int)
+
+    .. versionadded:: 4.3.0
+
+    Convert the given integer to a string. Note: integers in YARA are signed.
+
+    *Example: math.to_string(10) == "10"*
+    *Example: math.to_string(-1) == "-1"*
+
+.. c:function:: to_string(int, base)
+
+    .. versionadded:: 4.3.0
+
+    Convert the given integer to a string in the given base. Supported bases are
+    10, 8 and 16. Note: integers in YARA are signed.
+
+    *Example: math.to_string(32, 16) == "20"*
+    *Example: math.to_string(-1, 16) == "ffffffffffffffff"*
